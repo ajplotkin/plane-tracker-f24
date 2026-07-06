@@ -1,0 +1,1486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="reader" content="none">
+<title>Display Mirror</title>
+<link rel="icon" href="/favicon.ico">
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #0a0a0a;
+    color: #ffa500;
+    font-family: 'Share Tech Mono', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+}
+h1 {
+    font-family: 'VT323', monospace;
+    font-size: 28px;
+    color: #ffa500;
+    margin-bottom: 10px;
+    text-shadow: 0 0 10px rgba(255,165,0,0.3);
+}
+.nav { margin-bottom: 15px; font-size: 14px; }
+.nav a { color: #888; text-decoration: none; margin: 0 8px; }
+.nav a:hover { color: #ffa500; }
+.display-wrap {
+    position: relative;
+    border: 2px solid #333;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #030302;
+}
+canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+.scanlines {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+        transparent 0px, transparent 2px,
+        rgba(0,0,0,0.12) 2px, rgba(0,0,0,0.12) 4px
+    );
+}
+.vignette {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 80px rgba(0,0,0,0.6);
+}
+.controls {
+    margin-top: 15px; display: flex; align-items: center;
+    gap: 15px; font-size: 13px; color: #666;
+}
+.controls input[type="range"] { width: 120px; accent-color: #ffa500; }
+.status { margin-top: 10px; font-size: 12px; color: #444; }
+.status.connected { color: #4a4; }
+.status.error { color: #a44; }
+/* ATC audio bar (mirror plays the LiveATC URL itself — zero Pi cost) */
+.atc-bar {
+    margin-top: 12px; display: none; align-items: center; gap: 10px;
+    font-size: 12px; color: #888;
+    border: 1px solid #333; border-radius: 4px; padding: 8px 12px;
+    background: #111;
+}
+.atc-bar.show { display: flex; }
+.atc-btn {
+    background: #1a1a15; border: 1px solid #806000; color: #ffa500;
+    font-family: 'Share Tech Mono', monospace; font-size: 12px;
+    padding: 4px 10px; cursor: pointer; border-radius: 3px;
+}
+.atc-btn:hover { border-color: #ffa500; color: #ffd54f; }
+.atc-meta { color: #806000; }
+.atc-select {
+    background: #1a1a15; border: 1px solid #806000; color: #ffa500;
+    font-family: 'Share Tech Mono', monospace; font-size: 12px;
+    padding: 3px 6px; border-radius: 3px; max-width: 220px;
+}
+.atc-select:hover { border-color: #ffa500; }
+.atc-live { color: #4a4; }
+.atc-icon {
+    background: #1a1a15; border: 1px solid #444; color: #806000;
+    padding: 3px 6px; cursor: pointer; border-radius: 3px; line-height: 0;
+}
+.atc-icon svg { width: 16px; height: 16px; fill: currentColor; }
+.atc-icon:hover { border-color: #ffa500; color: #ffa500; }
+.atc-icon.active { border-color: #ffa500; color: #ffa500; background: #2a2210; }
+.atc-pop {
+    position: absolute; bottom: 110%; right: 0; display: none;
+    background: #111; border: 1px solid #806000; border-radius: 4px;
+    padding: 4px; min-width: 200px; z-index: 400; text-align: left;
+}
+.atc-pop.show { display: block; }
+.atc-pop .item {
+    padding: 6px 10px; cursor: pointer; color: #ffa500; font-size: 12px;
+    font-family: 'Share Tech Mono', monospace; border-radius: 3px;
+    white-space: nowrap;
+}
+.atc-pop .item:hover { background: #2a2210; }
+.atc-pop .item.current { color: #ffd54f; }
+.atc-bar { position: relative; }
+/* Resume overlay after a deploy self-reload killed browser audio (note 2) */
+.atc-resume {
+    position: fixed; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.72); z-index: 500; cursor: pointer;
+}
+.atc-resume.show { display: flex; }
+.atc-resume .panel {
+    background: #111; border: 1px solid #806000; border-radius: 6px;
+    padding: 22px 28px; text-align: center; color: #ffa500;
+    font-family: 'Share Tech Mono', monospace;
+}
+.atc-resume .panel .big { font-size: 18px; margin-bottom: 8px; color: #ffd54f; }
+.atc-resume .panel .sub { font-size: 12px; color: #806000; }
+</style>
+</head>
+<body>
+<h1>DISPLAY MIRROR</h1>
+<div id="location" style="color:#806000;font-size:14px;margin-bottom:6px"></div>
+<nav class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/stats">Stats</a>
+    <a href="/config">Config</a>
+    <a href="/usage">API Usage</a>
+</nav>
+<div class="display-wrap">
+    <canvas id="matrix"></canvas>
+    <div class="scanlines"></div>
+    <div class="vignette"></div>
+</div>
+<div class="controls">
+    <label>Zoom: <input type="range" id="zoom" min="4" max="20" value="10"></label>
+    <span id="zoom-label">10x</span>
+</div>
+<div class="status" id="status">Connecting...</div>
+
+<!-- ATC audio: the mirror plays the LiveATC stream directly (no Pi pipeline) -->
+<div class="atc-bar" id="atc-bar">
+    <button class="atc-btn" id="atc-toggle">▶ ATC</button>
+    <select class="atc-select" id="atc-select" title="Station">
+        <option value="auto">Auto — follows traffic</option>
+    </select>
+    <span class="atc-meta" id="atc-meta"></span>
+    <button class="atc-icon" id="atc-local" title="Play on this device / Pi speaker">
+        <svg id="atc-local-browser" viewBox="0 0 24 24"><path d="M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z"/></svg>
+        <svg id="atc-local-usb" viewBox="0 0 24 24" style="display:none"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+    </button>
+    <button class="atc-icon" id="atc-cast" title="Cast">
+        <svg viewBox="0 0 24 24"><path d="M1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.92-11-11-11zm20-7H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
+    </button>
+    <button class="atc-icon" id="atc-airplay" title="AirPlay">
+        <svg viewBox="0 0 24 24"><path d="M6 22h12l-6-7-6 7zM21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4v-2H3V5h18v12h-4v2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
+    </button>
+    <span class="atc-live" id="atc-live"></span>
+    <div class="atc-pop" id="atc-pop"></div>
+    <audio id="atc-audio" preload="none"></audio>
+</div>
+<div class="atc-resume" id="atc-resume">
+    <div class="panel">
+        <div class="big">🔊 ATC audio was on</div>
+        <div class="sub">Click anywhere to resume after reload</div>
+    </div>
+</div>
+
+<script>
+// POLL_MS gates page/data freshness (flightIdx = scroll_epoch.idx, flights
+// list) — scroll is time-extrapolated between polls, but a page change only
+// reaches the mirror on the next poll. At 2000ms that lagged the LED by up to
+// ~2s (very visible on the fast-paging overhead-flights scene); the endpoint
+// is ~9ms so 1000ms is trivially cheap and halves the page-change lag.
+const COLS = 64, ROWS = 32, FPS = 15, POLL_MS = 1000;
+
+// Font metrics: extrasmall=4x6, small=5x8 (width x height)
+const XS_W = 4, XS_H = 6, SM_W = 5, SM_H = 8;
+
+// All hex values verified against setup/colours.py
+const C = {
+    bg:'#030302',
+    clockDay:'#fea727',      // LIGHT_ORANGE (254,167,39)
+    clockNight:'#28b7f6',    // LIGHT_BLUE (40,183,246)
+    white:'#ffffff',
+    grey:'#c0c0c0',          // GREY (192,192,192)
+    lightGrey:'#bcbdbc',     // LIGHT_GREY (188,189,188)
+    darkBlue:'#0c46e6',      // DARK_BLUE (12,70,230)
+    hiTemp:'#ff7142',        // LIGHT_DARK_ORANGE (255,113,66)
+    loTemp:'#42a4f4',        // LIGHT_MID_BLUE (66,164,244)
+    lightBlue:'#28b7f6',     // LIGHT_BLUE (40,183,246)
+    flightAlpha:'#aa46bc',   // LIGHT_PURPLE (170,70,188)
+    flightNum:'#fea727',     // LIGHT_ORANGE (254,167,39)
+    planeType:'#42a4f4',     // LIGHT_MID_BLUE
+    planeDist:'#ec417b',     // LIGHT_PINK (236,65,123)
+    climb:'#9ccc65',         // LIGHT_GREEN (156,204,101)
+    descent:'#e47372',       // LIGHT_LIGHT_RED (228,115,114)
+    limegreen:'#32cd32',     // LIMEGREEN (50,205,50)
+    lightRed:'#ef5251',      // LIGHT_RED (239,82,81)
+    lightMidGreen:'#67ba6a', // LIGHT_MID_GREEN (103,186,106)
+    lightYellow:'#feef58',   // LIGHT_YELLOW (254,239,88)
+    lightMidOrange:'#ff8d35',// LIGHT_MID_ORANGE (255,141,53)
+    lightDarkBlue:'#5c6bc0', // LIGHT_DARK_BLUE (92,107,192)
+    lightTeal:'#26c6da',     // LIGHT_TEAL (38,198,218)
+    lightDarkTeal:'#27a69b', // LIGHT_DARK_TEAL (39,166,155)
+    tideHigh:'#00ffff', tideLow:'#42a4f4', waterTemp:'#00c896',
+    yellow:'#ffff00', red:'#ff0000',
+    purple:'#800080', cyan:'#00ffff', green:'#00ff00', // GREEN (0,255,0)
+    darkPurple:'#8f25aa',    // DARK_PURPLE (143,37,170)
+    darkMidPurple:'#c792d4', // DARK_MID_PURPLE (199,146,212) — was #6a3abf
+};
+const ALERT_COLORS = {
+    white:C.white, cyan:C.cyan, yellow:C.yellow,
+    orange:C.clockDay, red:C.red, grey:C.grey,  // orange = LIGHT_ORANGE #fea727
+    green:C.green, purple:C.purple, steelblue:'#3c508c',
+    blue:C.lightBlue,  // LIGHT_BLUE #28b7f6
+};
+
+// ── State ───────────────────────────────────────────────────────────────
+let S = 10, state = null;
+let flightIdx = 0;
+// C5: sticky client-side scroll epoch — captured ONCE when scroll_epoch.ts
+// is missing, never re-evaluated per frame
+let stickyScrollEpoch = null;
+// Clock skew correction — averaged over recent polls for stability
+let clockOffset = 0;
+const clockOffsets = [];
+function serverNow() { return Date.now() / 1000 + clockOffset; }
+const imgCache = {};
+
+const canvas = document.getElementById('matrix');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+    S = parseInt(document.getElementById('zoom').value);
+    document.getElementById('zoom-label').textContent = S + 'x';
+    canvas.width = COLS * S;
+    canvas.height = ROWS * S;
+}
+document.getElementById('zoom').addEventListener('input', resize);
+resize();
+
+// ── Drawing ─────────────────────────────────────────────────────────────
+
+// Draw text at matrix coords (x, y = baseline). charW = char width in matrix px.
+function text(str, x, y, color, charW) {
+    if (!str) return 0;
+    const fontPx = Math.round((charW * S) / 0.6);
+    ctx.font = `bold ${fontPx}px "Courier New", monospace`;
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = Math.max(1, S * 0.3);
+    ctx.fillText(str, x * S, y * S);
+    ctx.shadowBlur = 0;
+    return str.length * charW;
+}
+
+function textSegs(segs, x, y, charW) {
+    let cx = x;
+    for (const s of segs) { cx += text(s.t, cx, y, s.c, charW); }
+    return cx - x;
+}
+
+function loadImg(url) {
+    if (url in imgCache) return imgCache[url];
+    const img = new Image();
+    img.src = url;
+    img.onload = () => { imgCache[url] = img; };
+    img.onerror = () => { imgCache[url] = false; };
+    imgCache[url] = null;
+    return null;
+}
+
+function drawImage(img, x, y, w, h) {
+    if (!img) return;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, x * S, y * S, w * S, h * S);
+}
+
+function lerpColor(c1, c2, t) {
+    const p = (s,i) => parseInt(s.slice(i,i+2),16);
+    const r1=p(c1,1),g1=p(c1,3),b1=p(c1,5),r2=p(c2,1),g2=p(c2,3),b2=p(c2,5);
+    return `rgb(${Math.round(r1+(r2-r1)*t)},${Math.round(g1+(g2-g1)*t)},${Math.round(b1+(b2-b1)*t)})`;
+}
+
+// ── Scene logic ─────────────────────────────────────────────────────────
+// Mirrors the real LED behavior:
+// - Clock + date only draw when NO flights overhead (self._data is empty)
+// - When flights overhead, clock/date return early — flight scenes own the display
+// - Alerts rotate every 4 seconds (3 if >4 alerts)
+// - Date/tide cycles every 5 seconds
+// - Long alerts (>9 chars) suppress the date zone entirely
+// - Single long alerts get a blank slot injected for cycling on/off
+
+function hasFlight() {
+    // C7: stale overhead data (>120s) is treated as no flights
+    if (!state.flights || state.flights.length === 0) return false;
+    return serverNow() - (state.flights_ts || 0) <= 120;
+}
+
+function getAlertFromServer() {
+    // Server tells us: at timestamp T, slot was S, cycle is C seconds.
+    // We interpolate: current_slot = S + floor((now - T) / C)
+    const ac = state.alerts_cache;
+    if (!ac || !ac.alerts || ac.alerts.length === 0) return null;
+    const elapsed = serverNow() - (ac.ts || 0);
+    // C7: stale alert cache (>90s) → no alerts
+    if (elapsed > 90) return null;
+    // The slot indexes the FULL list, including blank slots {text: null}
+    const n = ac.alerts.length;
+    const slot = ((ac.slot || 0) + Math.floor(elapsed / (ac.cycle_secs || 4))) % n;
+    const a = ac.alerts[slot];
+    // C3: blank slot — no alert this window, and the date is NOT suppressed
+    // (drawDate gets this window, matching the LED's blink cycle)
+    if (!a || !a.text) return null;
+    return { text: a.text, color: ALERT_COLORS[a.color] || C.grey };
+}
+
+function drawClock() {
+    // On real LED: clock scene returns early when flights overhead
+    if (hasFlight()) return;
+
+    // C8/E7: render the PANEL's local time (server time + Pi's UTC offset),
+    // not the browser's local time
+    const panel = new Date((serverNow() + (state.utc_offset_sec || 0)) * 1000);
+    const fmt = state.clock_format || '12hr';
+    let h = panel.getUTCHours(), m = panel.getUTCMinutes();
+    let timeStr;
+    if (fmt === '12hr') {
+        h = h % 12 || 12;
+        timeStr = h + ':' + String(m).padStart(2,'0');
+    } else {
+        timeStr = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+    }
+
+    // E4: clock.py:281-286 — RED clock when sunrise/sunset unavailable
+    let clockColor;
+    if (!state.sunrise || !state.sunset) {
+        clockColor = C.red;
+    } else {
+        const nowMs = serverNow() * 1000;
+        const sr = new Date(state.sunrise).getTime();
+        const ss = new Date(state.sunset).getTime();
+        clockColor = (nowMs >= sr && nowMs < ss) ? C.clockDay : C.clockNight;
+    }
+    text(timeStr, 0, 5, clockColor, XS_W);
+
+    // Alerts — synced from server (same slot the LED is showing)
+    const alert = getAlertFromServer();
+    if (alert) {
+        text(alert.text, 0, 11, alert.color, XS_W);
+        if (alert.text.length > 9) return 'suppress_date';
+    }
+    return null;
+}
+
+function drawTemp() {
+    if (hasFlight()) return;
+    // E4: temperature.py: red 'ERR' when either reading is missing
+    if (state.temperature == null || state.humidity == null) {
+        text('ERR', 36, 5, C.red, XS_W);
+        return;
+    }
+    const t = Math.round(state.temperature);
+    const hum = state.humidity / 100;
+    text(t + '\u00b0', 36, 5, lerpColor(C.white, C.darkBlue, hum), XS_W);
+    // UV chip right-aligned at x=63, EPA colours (mirrors temperature.py)
+    const uv = state.uv_index;
+    if (uv != null && uv > 0) {
+        const u = Math.max(1, Math.round(uv));
+        const uc = u >= 11 ? C.purple : u >= 8 ? C.red
+                 : u >= 6 ? C.clockDay : u >= 3 ? C.yellow : C.green;
+        const us = (u < 10 ? 'UV' : 'U') + u;  // 12px max, clears a 4-char temp
+        text(us, 64 - 4 * us.length, 5, uc, XS_W);
+    }
+}
+
+function drawDate(suppressDate) {
+    if (hasFlight()) return;
+    if (suppressDate === 'suppress_date') return;
+
+    // Interpolate: server tells us slot S at time T with cycle C.
+    // Current slot = S + floor((now - T) / C) mod total
+    const dd = state.date_display;
+    if (!dd || !dd.items || dd.items.length === 0) return;
+
+    const elapsed = serverNow() - (dd.ts || 0);
+    const slot = ((dd.slot || 0) + Math.floor(elapsed / (dd.cycle_secs || 5))) % dd.items.length;
+    const item = dd.items[slot];
+    if (!item) return;
+
+    // E5: pick the forecast entry whose LOCAL date matches today
+    // (date.py:46-52); null when unavailable → date rendered in RED
+    let moonPhase = null;
+    if (state.forecast && state.forecast.length > 0) {
+        const now = new Date();
+        const pad2 = n => String(n).padStart(2, '0');
+        const todayStr = now.getFullYear() + '-' + pad2(now.getMonth() + 1) +
+            '-' + pad2(now.getDate());
+        for (const day of state.forecast) {
+            if ((day.startTime || '').slice(0, 10) === todayStr) {
+                const mp = day.values?.moonPhase;
+                if (mp != null) moonPhase = Math.trunc(mp);
+                break;
+            }
+        }
+    }
+    // Moon phase gradient pairs [start, end] matching date.py map_moon_phase_to_color
+    const moonGradients = [
+        [C.darkPurple, C.darkPurple],
+        [C.darkPurple, C.darkMidPurple],
+        [C.darkPurple, C.white],
+        [C.darkMidPurple, C.white],
+        [C.grey, C.grey],
+        [C.white, C.darkMidPurple],
+        [C.white, C.darkPurple],
+        [C.darkMidPurple, C.darkPurple],
+    ];
+    const colorMap = {
+        high: C.tideHigh,
+        low: C.tideLow,
+        water: C.waterTemp,
+        water_fb: '#64a0c8',
+    };
+
+    if (item.type === 'date') {
+        // Per-character gradient (matches date.py draw_gradient_text)
+        // E5: date.py:183-188 — RED when no moon phase; clamp 0..7 (not %8)
+        const [startC, endC] = moonPhase == null
+            ? [C.red, C.red]
+            : moonGradients[Math.min(Math.max(moonPhase, 0), 7)];
+        const txt = item.text;
+        for (let i = 0; i < txt.length; i++) {
+            const pos = txt.length > 1 ? i / (txt.length - 1) : 0;
+            const charColor = lerpColor(startC, endC, pos);
+            text(txt[i], 36 + i * XS_W, 11, charColor, XS_W);
+        }
+    } else {
+        text(item.text, 36, 11, colorMap[item.type] || C.grey, XS_W);
+    }
+}
+
+function drawForecast() {
+    if (!state.forecast || state.forecast.length < 3) return;
+    if (hasFlight()) return;
+
+    // Midnight switch: skip forecast entries before today (daysforecast.py)
+    // E1: compare LOCAL dates (astimezone() logic), not UTC toISOString
+    const now = new Date();
+    const pad2 = n => String(n).padStart(2, '0');
+    const localDateStr = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) +
+        '-' + pad2(d.getDate());
+    const todayStr = localDateStr(now);
+    const filtered = state.forecast.filter(f =>
+        localDateStr(new Date(f.startTime)) >= todayStr);
+    if (filtered.length < 3) return;
+
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const colW = 21;
+
+    for (let i = 0; i < 3; i++) {
+        const f = filtered[i];
+        if (!f) continue;
+        const x = i * colW + 1;
+        const dt = new Date(f.startTime);
+
+        // Day name centered: offset + (21-12)//2 + 1 = offset + 5
+        text(days[dt.getDay()], x + 5, 17, C.planeDist, XS_W);
+
+        // Icon centered: offset + (21-10)//2 = offset + 5, at y=17
+        const code = f.values?.weatherCodeFullDay;
+        if (code) {
+            const img = loadImg('/icons/' + code + '.png');
+            if (img) drawImage(img, x + 5, 17, 10, 10);
+        }
+
+        // LED: hi(max) LEFT, lo(min) RIGHT, y=32
+        const hi = Math.round(f.values?.temperatureMax || 0);
+        const lo = Math.round(f.values?.temperatureMin || 0);
+        const hiStr = String(hi), loStr = String(lo);
+        const tempGap = 2;
+        const totalTempW = hiStr.length * XS_W + loStr.length * XS_W + tempGap;
+        const tempX = x + Math.floor((colW - totalTempW) / 2) + 1;
+        text(hiStr, tempX, 32, C.hiTemp, XS_W);
+        text(loStr, tempX + hiStr.length * XS_W + tempGap, 32, C.loTemp, XS_W);
+    }
+}
+
+// Delay color thresholds (matches journey.py exactly)
+// D1/D3: missing delay → LIGHT_GREY (journey.py:77-78, trackedroute.py:16-18)
+function depDelayColor(mins) {
+    if (mins == null || isNaN(mins)) return C.lightGrey;
+    if (mins <= 20) return C.lightMidGreen;
+    if (mins <= 40) return C.lightYellow;
+    if (mins <= 60) return C.lightMidOrange;
+    if (mins <= 240) return C.lightRed;
+    if (mins <= 480) return C.flightAlpha;
+    return C.lightDarkBlue;
+}
+function arrDelayColor(mins) {
+    if (mins == null || isNaN(mins)) return C.lightGrey;
+    if (mins <= 0) return C.lightMidGreen;
+    if (mins <= 30) return C.lightYellow;
+    if (mins <= 60) return C.lightMidOrange;
+    if (mins <= 240) return C.lightRed;
+    if (mins <= 480) return C.flightAlpha;
+    return C.lightDarkBlue;
+}
+
+// A4: journey.py:167-231 triangle arrow — 5 columns at x=38..42, vertical
+// lines shrinking toward the point at (42,5); split LIGHT_GREEN (flown) /
+// LIGHT_LIGHT_RED (remaining) by the distance ratio thresholds; all-GREY
+// when either distance is 0
+function drawJourneyArrow(f) {
+    const dOrig = Math.trunc(f.distance_origin || 0);
+    const dDest = Math.trunc(f.distance_destination || 0);
+    let originPx = -1;  // -1 -> all GREY
+    if (dOrig !== 0 && dDest !== 0) {
+        const r = dOrig / (dOrig + dDest);
+        if (r <= 0.10) originPx = 0;
+        else if (r <= 0.30) originPx = 1;
+        else if (r <= 0.50) originPx = 2;
+        else if (r <= 0.70) originPx = 3;
+        else if (r <= 0.90) originPx = 4;
+        else originPx = 5;
+    }
+    // x = 42-5+1 = 38; y1 = 5-4 = 1; y2 = 5+4 = 9
+    let x = 38, y1 = 1, y2 = 9;
+    for (let i = 0; i < 5; i++) {
+        ctx.fillStyle = originPx < 0 ? C.grey
+            : (i < originPx ? C.climb : C.descent);
+        ctx.fillRect(x * S, y1 * S, S, (y2 - y1 + 1) * S);
+        x += 1; y1 += 1; y2 -= 1;
+    }
+}
+
+function drawFlight() {
+    if (!hasFlight()) return;
+    const flights = state.flights;
+
+    // E3: flight index from epoch BEFORE capturing f, so a page change
+    // never renders one frame of the previous flight's logo/journey
+    flightIdx = (state.scroll_epoch?.idx || 0) % flights.length;
+    const f = flights[flightIdx];
+
+    // ── Top zone: Logo (0,0 16x16) + Journey (17,10) + Distances (y=16) ──
+
+    // A5: default.png when owner_icao is empty/'N/A'; aspect-preserving
+    // thumbnail into the 16x16 box (flightlogo.py)
+    let icao = f.owner_icao || '';
+    if (!icao || icao === 'N/A') icao = 'default';
+    let logoImg = loadImg('/logos/' + icao + '.png');
+    if (logoImg === false) logoImg = loadImg('/logos/default.png');
+    if (logoImg && logoImg.width && logoImg.height) {
+        // PIL thumbnail(): shrink-only, scale by the larger dimension
+        const scale = Math.min(1, 16 / Math.max(logoImg.width, logoImg.height));
+        drawImage(logoImg, 0, 0, logoImg.width * scale, logoImg.height * scale);
+    }
+
+    // City pair at baseline 10, flanking the arrow (journey.py)
+    // Using extrasmall font (4px wide) since regularplus (7px) is too wide
+    const origin = f.origin || ' ? ';   // JOURNEY_BLANK_FILLER
+    const dest = f.destination || ' ? ';
+    // D1: colour by delay ONLY when both actual and scheduled times exist
+    const oColor = (f.time_real_departure && f.time_scheduled_departure)
+        ? depDelayColor((f.time_real_departure - f.time_scheduled_departure) / 60)
+        : C.lightGrey;
+    const dColor = (f.time_estimated_arrival && f.time_scheduled_arrival)
+        ? arrDelayColor((f.time_estimated_arrival - f.time_scheduled_arrival) / 60)
+        : C.lightGrey;
+    text(origin, 17, 10, oColor, XS_W);
+    text(dest, 44, 10, dColor, XS_W);
+
+    // A4: triangle arrow at fixed position (42,5)
+    drawJourneyArrow(f);
+
+    // C6/D6: journey.py:55-60 unit strings — exact case incl. 'KM'/'Units'
+    let jUnits;
+    if (state.distance_units === 'imperial') jUnits = 'mi';
+    else if (state.distance_units === 'metric') jUnits = 'KM';
+    else jUnits = 'Units';
+
+    // A3: distances centered per half (journey.py:133-141); per-char
+    // colouring: digits DISTANCE_COLOUR, rest DISTANCE_MEASURE
+    const drawDist = (txt, x) => {
+        let cx = x;
+        for (const ch of txt) {
+            cx += text(ch, cx, 16, /\d/.test(ch) ? C.lightTeal : C.lightDarkTeal, XS_W);
+        }
+    };
+    if (f.distance_origin != null) {
+        const txt = Math.round(f.distance_origin) + jUnits;
+        drawDist(txt, 16 + Math.floor((24 - 4 * txt.length) / 2));
+    }
+    if (f.distance_destination != null) {
+        const txt = Math.round(f.distance_destination) + jUnits;
+        drawDist(txt, 40 + Math.floor((24 - 4 * txt.length) / 2));
+    }
+
+    // ── Bottom zone: Scrolling flight details + plane details ──
+
+    // C2: flight-number line mirrors flightdetails.py:94-108 — nothing at
+    // all is drawn when callsign is empty or 'N/A'
+    let fSegs = [];
+    const callsign = f.callsign || '';
+    if (callsign && callsign !== 'N/A') {
+        const owner = f.owner_icao || '';
+        let flightNo = (owner && callsign.startsWith(owner))
+            ? callsign.slice(owner.length) : callsign;
+        const iataFlight = f.flight_number || '';
+        if (iataFlight) flightNo = iataFlight;
+        const airline = f.airline || '';
+        const mainText = airline ? airline + ' ' + flightNo : flightNo;
+        // D2: alpha_len colour split (flightdetails.py:110-119)
+        const designatorLen = iataFlight ? 2 : 0;
+        const alphaLen = (airline ? airline.length + 1 : 0) + designatorLen;
+        for (let i = 0; i < mainText.length; i++) {
+            const ch = mainText[i];
+            fSegs.push({t: ch, c: (i < alphaLen) ? C.flightAlpha
+                : (/\d/.test(ch) ? C.flightNum : C.flightAlpha)});
+        }
+    }
+
+    // Plane details line (planedetails.py _build_char_list)
+    // C6/D6: planedetails.py:58-63 — 'mi'/'km', ANY other units -> 'nm'
+    const du = state.distance_units;
+    const pDistUnit = du === 'imperial' ? 'mi' : (du === 'metric' ? 'km' : 'nm');
+    let pSegs = [{t: (f.plane || '') + ' ', c: C.planeType}];
+    const dist = f.distance != null ? f.distance.toFixed(2) : '';
+    pSegs.push({t: dist + pDistUnit + ' ' + (f.direction || ''), c: C.planeDist});
+    const alt = f.altitude || 0;
+    if (alt) {
+        // C6/D6: planedetails.py:40-50 — metric: metres 'm' via int(alt*0.3048);
+        // imperial/other: FL above 18000 or comma-formatted feet (E6)
+        let altStr;
+        if (du === 'metric') altStr = Math.trunc(Math.trunc(alt) * 0.3048) + 'm';
+        else if (alt >= 18000) altStr = 'FL' + Math.floor(alt / 100);
+        else altStr = Math.trunc(alt).toLocaleString('en-US') + 'ft';
+        pSegs.push({t: ' @ ' + altStr, c: C.planeDist});
+        const vs = f.vertical_speed || 0;
+        if (vs > 64) pSegs.push({t: '↑', c: C.climb});
+        else if (vs < -64) pSegs.push({t: '↓', c: C.descent});
+    }
+    // Heading arrow (8-point compass, planedetails.py int() truncation)
+    if (f.heading != null) {
+        const hdgArrows = ['↑','↗','→','↘','↓','↙','←','↖'];
+        pSegs.push({t: ' ' + hdgArrows[Math.trunc((f.heading + 22.5) / 45) % 8],
+                    c: C.planeDist});
+    }
+
+    const fW = fSegs.reduce((a,s) => a + s.t.length * SM_W, 0);
+    const pW = pSegs.reduce((a,s) => a + s.t.length * SM_W, 0);
+    const localMaxW = Math.max(fW, pW);
+
+    // Scroll synced from LED's scroll_epoch.
+    // C1: Python wraps when pos + max_width < 0 starting from 64, so the
+    // cycle length is max_width + COLS + 1
+    const cyclePx = (state.scroll_epoch?.max_width ?? localMaxW) + COLS + 1;
+    // C5: no epoch ts -> sticky client-side epoch, captured once
+    let epochTs = state.scroll_epoch?.ts;
+    if (epochTs == null) {
+        if (stickyScrollEpoch === null) stickyScrollEpoch = serverNow();
+        epochTs = stickyScrollEpoch;
+    }
+    const startPos = state.scroll_epoch?.pos ?? COLS;
+    const elapsed = serverNow() - epochTs;
+    const scrolled = (((COLS - startPos + elapsed * 10) % cyclePx) + cyclePx) % cyclePx;
+    const scrollPos = COLS - scrolled;
+
+    // A1: flight-number line owns rows 17-24 (flightdetails.py; indicator
+    // zone is x52-63, rows 17-24)
+    // ISS badge: during an active pass the indicator zone alternates
+    // "N/M" <-> "ISS" every 2s (steady "ISS" when single flight) —
+    // mirrors flightdetails.py's dwell-rotation badge.
+    const issPassNow = getActiveISSPass();
+    const badgePhase = Math.floor(serverNow() / 2) % 2 === 1;
+    if (flights.length > 1 || issPassNow) {
+        const showBadge = issPassNow && (flights.length <= 1 || badgePhase);
+        const pgText = showBadge ? 'ISS' : (flightIdx+1)+'/'+flights.length;
+        // Clear + draw indicator zone
+        ctx.fillStyle = C.bg;
+        ctx.fillRect(52 * S, 17 * S, 12 * S, 8 * S);
+        text(pgText, 52, 24, showBadge ? '#6482b4' : C.grey, XS_W);
+        // Clip scroll text at the indicator-zone boundary
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 17 * S, 52 * S, 8 * S);
+        ctx.clip();
+        textSegs(fSegs, scrollPos, 24, SM_W);
+        ctx.restore();
+    } else {
+        textSegs(fSegs, scrollPos, 24, SM_W);
+    }
+
+    // A2: plane-details line owns rows 25-31 (planedetails.py
+    // PLANE_ZONE_TOP=25) — clip so tall glyphs never bleed into row 24
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 25 * S, COLS * S, 7 * S);
+    ctx.clip();
+    textSegs(pSegs, scrollPos, 31, SM_W);
+    ctx.restore();
+}
+
+// ── Tracked Flight Scene ────────────────────────────────────────────────
+
+// Tracked scroll computed from timestamp (no local state needed)
+
+function hasTracked() {
+    const t = state.tracked;
+    if (!t || !t.callsign) return false;
+    // C7: stale tracked data (>120s by _mirror_ts) is ignored
+    return serverNow() - (t._mirror_ts || 0) <= 120;
+}
+
+function drawTracked() {
+    const t = state.tracked;
+    if (!t) return;
+
+    // --- Line 1: Route (y=19) — scrolling logo + airline + flight → origin → dest ---
+    const icao = (t.callsign || '').substring(0, 3);
+    const logo = (icao ? loadImg('/logos/' + icao + '.png') : null)
+        || loadImg('/logos/default.png');
+
+    // Build route segments — LED shows "Airline Name 123" (strips IATA prefix when name is known)
+    const rawNum = t.number || t.callsign || '';
+    const flightDigits = rawNum.replace(/[^0-9]/g, '');
+    const airlineName = t.airline_name || '';
+    const displayName = airlineName
+        ? (airlineName + ' ' + flightDigits).trim() : rawNum;
+    // D2: alpha-prefix colour split (trackedroute.py:120-127) — skip the
+    // 2-char IATA designator only when falling back to the raw number
+    const trDesignatorLen = airlineName ? 0 : 2;
+    const alphaPrefix = (airlineName ? airlineName.length + 1 : 0) + trDesignatorLen;
+    let rSegs = [];
+    for (let i = 0; i < displayName.length; i++) {
+        const ch = displayName[i];
+        rSegs.push({t: ch, c: (i < alphaPrefix) ? C.flightAlpha
+            : (/\d/.test(ch) ? C.flightNum : C.flightAlpha)});
+    }
+    // Origin/destination delay coloring (trackedroute.py:16-18)
+    // D1: colour by delay ONLY when both times exist, else LIGHT_GREY
+    const origColor = (t.time_real_departure && t.time_scheduled_departure)
+        ? depDelayColor((t.time_real_departure - t.time_scheduled_departure) / 60)
+        : C.lightGrey;
+    const destColor = (t.time_estimated_arrival && t.time_scheduled_arrival)
+        ? arrDelayColor((t.time_estimated_arrival - t.time_scheduled_arrival) / 60)
+        : C.lightGrey;
+
+    rSegs.push({t: ' ', c: C.white});
+    rSegs.push({t: t.origin || '???', c: origColor});
+    rSegs.push({t: ' \u2192 ', c: C.white});
+    rSegs.push({t: t.destination || '???', c: destColor});
+
+    // Scroll — use epoch if available, otherwise use tracked data timestamp
+    const logoW = 8, logoGap = 2;
+    const rW = rSegs.reduce((a,s) => a + s.t.length * SM_W, 0) + logoW + logoGap;
+    // Use per-scene epoch (written each time route scroll wraps on LED)
+    const trEpoch = state.tracked_route_epoch?.ts || t._mirror_ts || serverNow();
+    const trWidth = state.tracked_route_epoch?.width || rW;
+    const trElapsed = serverNow() - trEpoch;
+    const trCyclePx = COLS + trWidth + 1;
+    const trPos = COLS - ((trElapsed * 10) % trCyclePx);
+
+    if (logo) drawImage(logo, trPos, 12, logoW, logoW);
+    textSegs(rSegs, trPos + logoW + logoGap, 19, SM_W);
+
+    // --- Line 2: Progress bar (y=22) ---
+    // D4: trackedprogress.py — full-width bar (barStart=0, barW=64),
+    // planeX = floor(progress*60), dashes on ABSOLUTE x parity, no dashes
+    // under the plane, plane red when is_live === false. Python draws the
+    // bar whenever tracked data exists (progress defaults to 0).
+    {
+        let progress = 0;
+        if (t.dist_remaining != null && t.total_distance > 0) {
+            progress = Math.max(0, Math.min(1,
+                (t.total_distance - t.dist_remaining) / t.total_distance));
+        }
+        const midY = 22;  // LINE2_Y - 1
+        const planeX = Math.max(0, Math.min(60, Math.floor(progress * 60)));
+        // Dotted progress bar (LIMEGREEN flown, LIGHT_RED remaining)
+        for (let x = 0; x < COLS; x++) {
+            if (x >= planeX && x < planeX + 4) continue;  // gap under plane
+            if (Math.floor(x / 2) % 2 !== 0) continue;    // absolute parity
+            ctx.fillStyle = x < planeX ? C.limegreen : C.lightRed;
+            ctx.fillRect(x * S, midY * S, S, S);
+        }
+        // Plane: 4-px horizontal row at midY + single pixels above/below
+        // at planeX+2 (trackedprogress.py _draw_plane)
+        ctx.fillStyle = t.is_live === false ? C.lightRed : C.white;
+        for (let px = 0; px < 4; px++) ctx.fillRect((planeX + px) * S, midY * S, S, S);
+        ctx.fillRect((planeX + 2) * S, (midY - 1) * S, S, S);
+        ctx.fillRect((planeX + 2) * S, (midY + 1) * S, S, S);
+    }
+
+    // --- Line 3: Stats (y=31) — scrolling time, distance, aircraft, altitude, speed ---
+    let sSegs = [];
+    if (t.is_scheduled && !t.is_live) {
+        // D5: whole scheduled line in TIME_DIST_COLOUR (trackedstats.py:96-98)
+        // dep_time is "2026-07-01 18:30" — format per trackedstats.py:59-80,
+        // dropping ":00" minutes in 12hr mode ("6p" not "6:00p")
+        let depStr = '';
+        const dtParts = (t.dep_time || '').split(' ');
+        if (dtParts.length >= 2) {
+            const hm = dtParts[1].split(':');
+            const dh = parseInt(hm[0], 10);
+            const dm = hm.length > 1 ? parseInt(hm[1], 10) : 0;
+            if (!isNaN(dh) && !isNaN(dm)) {
+                if (state.clock_format === '12hr') {
+                    const ap = dh < 12 ? 'a' : 'p';
+                    const h12 = dh % 12 || 12;
+                    depStr = dm ? h12 + ':' + String(dm).padStart(2,'0') + ap
+                                : h12 + ap;
+                } else {
+                    depStr = dh + ':' + String(dm).padStart(2,'0');
+                }
+            } else {
+                depStr = t.dep_time;
+            }
+        }
+        const label = depStr
+            ? 'Departs ' + depStr + ' ' + (t.origin || '') + '→' + (t.destination || '')
+            : 'Scheduled ' + (t.origin || '') + '→' + (t.destination || '');
+        sSegs.push({t: label, c: C.loTemp});
+    } else if (t.is_live) {
+        // Live: "1:23 234mi B738 FL350↑ 260knts"
+        if (t.time_remaining) sSegs.push({t: t.time_remaining + ' ', c: C.loTemp});
+        if (t.dist_remaining != null) {
+            // C6/D6: trackedstats.py:109 — 'km' when metric, else 'mi'
+            const units = (state.distance_units === 'metric') ? 'km' : 'mi';
+            sSegs.push({t: Math.trunc(t.dist_remaining) + units + ' ', c: C.loTemp});
+        }
+        // Nearest landmark (computed server-side, matches trackedstats.py "nr CityName")
+        if (t._nearest_landmark) sSegs.push({t: 'nr ' + t._nearest_landmark + ' ', c: C.white});
+        // D5: omit aircraft type when '' or 'N/A' (trackedstats.py:132-136)
+        if (t.aircraft_type && t.aircraft_type !== 'N/A') {
+            sSegs.push({t: t.aircraft_type + ' ', c: C.planeDist});
+        }
+        if (t.altitude) {
+            // D5: trackedstats.py:34-43 — FL number zero-padded to 3 digits;
+            // E6: en-US thousands separator for feet
+            const alt = Math.trunc(t.altitude);
+            const altStr = alt >= 18000
+                ? 'FL' + String(Math.floor(alt / 100)).padStart(3, '0')
+                : alt.toLocaleString('en-US') + 'ft';
+            sSegs.push({t: altStr, c: C.planeDist});
+            const vs = t.vertical_speed || 0;
+            if (vs > 64) sSegs.push({t: '↑', c: C.climb});
+            else if (vs < -64) sSegs.push({t: '↓', c: C.descent});
+            sSegs.push({t: ' ', c: C.planeDist});
+        }
+        if (t.ground_speed) {
+            // FR24 returns knots; convert per SPEED_UNITS config.
+            // D5/C6: trackedstats.py:46-56 — 'knts' for the knots default
+            const su = state.speed_units || 'knots';
+            let spd = t.ground_speed, sUnit = 'knts';
+            if (su === 'imperial') { spd *= 1.15078; sUnit = 'mph'; }
+            else if (su === 'metric') { spd *= 1.852; sUnit = 'km/h'; }
+            sSegs.push({t: Math.trunc(spd) + sUnit, c: C.planeDist});
+        }
+    }
+
+    if (sSegs.length > 0) {
+        const sW = sSegs.reduce((a,s) => a + s.t.length * SM_W, 0);
+        // Use per-scene epoch (written each time stats scroll wraps on LED)
+        const tsEpoch = state.tracked_stats_epoch?.ts || t._mirror_ts || serverNow();
+        const tsWidth = state.tracked_stats_epoch?.width || sW;
+        const tsElapsed = serverNow() - tsEpoch;
+        const tsCyclePx = COLS + tsWidth + 1;
+        const tsPos = COLS - ((tsElapsed * 10) % tsCyclePx);
+        textSegs(sSegs, tsPos, 31, SM_W);
+    }
+}
+
+// ── ISS Pass Scene ──────────────────────────────────────────────────────
+
+function getActiveISSPass() {
+    if (!state.iss_passes || state.iss_passes.length === 0) return null;
+    // B4: pass activation/progress from the server clock, not the browser's
+    const now = serverNow() * 1000;
+    for (const p of state.iss_passes) {
+        const riseStr = p.rise?.time;
+        if (!riseStr) continue;
+        const riseMs = new Date(riseStr.replace('Z','+00:00')).getTime();
+        const durMs = (p.duration_sec || 0) * 1000;
+        if (now >= riseMs && now < riseMs + durMs) {
+            const elapsed = (now - riseMs) / 1000;
+            // B2: prefer live in-shadow visibility (written by the LED on
+            // takeover entry / theme flips; ignore its ts) over the fixed
+            // pass-level flag; fall back when iss_live is absent/empty
+            const visible = (typeof state.iss_live?.visible === 'boolean')
+                ? state.iss_live.visible
+                : (p.visible || false);
+            return {
+                progress: Math.max(0, Math.min(1, elapsed / (p.duration_sec || 1))),
+                timeRemaining: Math.max(0, p.duration_sec - Math.floor(elapsed)),
+                riseCompass: p.rise?.compass || '?',
+                setCompass: p.set?.compass || '?',
+                maxElev: p.culmination?.elevation_deg || 0,
+                visible: visible,
+            };
+        }
+    }
+    return null;
+}
+
+function drawISSPass(iss) {
+    // Warm (visible) vs cool (not visible) theme — matches isspass.py exactly
+    const warm = iss.visible;
+    const titleColor = warm ? C.white : '#6482b4';
+    const titleDim = warm ? C.lightGrey : '#32415a';  // fixed: was #324159
+    const trailColor = warm ? '#3c3214' : '#1e233c';
+    const flownColor = warm ? C.limegreen : '#286464';  // fixed: was C.climb
+    const remainColor = warm ? C.lightBlue : '#3c3c46'; // fixed: was C.loTemp
+    const infoColor = warm ? C.clockDay : '#787882';    // fixed: was C.orange, #78787e
+    const countdownColor = warm ? C.yellow : '#50a0aa';
+
+    // Title: blink 1s on, 1s off (B4: server clock; B5: floored centering)
+    const titleText = warm ? 'ISS VISIBLE' : 'ISS OVERHEAD';
+    const blink = (Math.floor(serverNow()) % 2 === 0);
+    const tw = titleText.length * XS_W;
+    const tx = Math.max(0, Math.floor((COLS - tw) / 2));
+    text(titleText, tx, 5, blink ? titleColor : titleDim, XS_W);
+
+    // ISS sprite moving left-to-right with trail dots
+    const issImg = loadImg('/logos/ISS_STATION.png');
+    const spriteW = 21, spriteH = 8; // ISS_STATION.png is 21x8
+    const spriteY = 6; // top of sprite region (matches isspass.py SPRITE_Y)
+    const midY = 10;   // vertical center for trail dots
+    const usable = COLS - spriteW;
+    const spriteX = Math.floor(iss.progress * usable);
+    for (let x = 0; x < spriteX; x += 2) {
+        ctx.fillStyle = trailColor;
+        ctx.fillRect(x * S, midY * S, S, S);
+    }
+    if (issImg) {
+        drawImage(issImg, spriteX, spriteY, spriteW, spriteH);
+    } else {
+        // Fallback: small marker while image loads
+        ctx.fillStyle = warm ? '#ffd700' : '#50648c';
+        ctx.fillRect(spriteX * S, midY * S, 2*S, 2*S);
+    }
+
+    // Direction + elevation (B5: Python int() truncates; floored centering)
+    const infoText = iss.riseCompass + '>' + iss.setCompass + ' ' + Math.trunc(iss.maxElev) + '\u00b0';
+    const iw = infoText.length * XS_W;
+    text(infoText, Math.max(0, Math.floor((COLS - iw) / 2)), 20, infoColor, XS_W);
+
+    // Progress bar with + marker (matches isspass.py)
+    const barW = COLS - 4, barStart = 2;
+    const flownPx = Math.floor(iss.progress * barW);
+    for (let x = 0; x < barW; x++) {
+        if (Math.floor(x / 2) % 2 === 0) {
+            ctx.fillStyle = x < flownPx ? flownColor : remainColor;
+            ctx.fillRect((barStart + x) * S, 23 * S, S, S);
+        }
+    }
+    // + marker at current position
+    // B3: THEME_DIM marker is muted white (140,140,160), not pure white
+    const markerX = barStart + Math.min(flownPx, barW - 1);
+    ctx.fillStyle = warm ? C.white : '#8c8ca0';
+    ctx.fillRect(markerX * S, 23 * S, S, S);
+    ctx.fillRect((markerX-1) * S, 23 * S, S, S);
+    ctx.fillRect((markerX+1) * S, 23 * S, S, S);
+    ctx.fillRect(markerX * S, 22 * S, S, S);
+    ctx.fillRect(markerX * S, 24 * S, S, S);
+
+    // Countdown (B5: floored centering, matches isspass.py //2)
+    const mins = Math.floor(iss.timeRemaining / 60);
+    const secs = iss.timeRemaining % 60;
+    const cdText = mins + ':' + String(secs).padStart(2,'0') + ' LEFT';
+    const cdw = cdText.length * SM_W;
+    text(cdText, Math.max(0, Math.floor((COLS - cdw) / 2)), 31, countdownColor, SM_W);
+}
+
+// ── Main loop ───────────────────────────────────────────────────────────
+
+// A6: loadingpulse.py — pixel (63,0) blinks in fading GREY while the LED
+// is fetching data. Time-based fade with a ~2s period approximates the
+// LED's 10-step counter; gated by processing.ts freshness (<120s).
+function drawLoadingPulse() {
+    const p = state.processing;
+    if (!p || !p.processing) return;
+    if (serverNow() - (p.ts || 0) >= 120) return;
+    const phase = (serverNow() % 2) / 2;   // 0..1 over ~2s
+    const b = (1 - phase) / 2;             // brightness 0.5 fading to 0
+    const v = Math.round(b * 192);         // GREY (192,192,192)
+    ctx.fillStyle = 'rgb(' + v + ',' + v + ',' + v + ')';
+    ctx.fillRect(63 * S, 0, S, S);
+}
+
+function render() {
+    if (!state) return;
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // ISS takeover takes priority over everything
+    const issPass = getActiveISSPass();
+    if (issPass) {
+        // B1: plane cameo — the LED shows one full flight scroll cycle
+        // before the takeover (isspass.py); mirror via the epoch's
+        // iss_plane_shown flag
+        if (hasFlight() && !state.scroll_epoch?.iss_plane_shown) {
+            drawFlight();
+        } else {
+            drawISSPass(issPass);
+        }
+        drawLoadingPulse();
+        return;
+    }
+
+    if (hasFlight()) {
+        // Flight mode: only flight scenes draw (clock/date/forecast suppressed)
+        drawFlight();
+    } else if (hasTracked()) {
+        // Tracked flight mode: clock + alerts + temp + date on top, tracked on bottom
+        const suppress = drawClock();
+        drawTemp();
+        drawDate(suppress);
+        drawTracked();
+    } else {
+        // Idle mode: clock + alerts + temp + date + forecast
+        const suppress = drawClock();
+        drawTemp();
+        drawDate(suppress);
+        drawForecast();
+    }
+    drawLoadingPulse();
+}
+
+function tick() { render(); setTimeout(tick, 1000 / FPS); }
+
+// ── Polling ─────────────────────────────────────────────────────────────
+
+// \u2500\u2500 ATC audio (browser output) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// The mirror plays the LiveATC stream URL itself when ATC is on and the
+// selected output is "browser". Autoplay policy: audio can only start from a
+// user gesture, so we persist the user's on/off choice in localStorage and,
+// after a deploy self-reload kills playback, re-show a click-to-resume overlay.
+const ATC = {
+    audioEl: document.getElementById('atc-audio'),
+    bar: document.getElementById('atc-bar'),
+    toggle: document.getElementById('atc-toggle'),
+    meta: document.getElementById('atc-meta'),
+    select: document.getElementById('atc-select'),
+    live: document.getElementById('atc-live'),
+    resume: document.getElementById('atc-resume'),
+    wantOn: localStorage.getItem('atc_want_on') === '1',
+    curUrl: '',
+    playing: false,
+    serverPlaying: false,
+    quiet: false,
+    streamErr: false,
+    errCount: 0,
+    nearbyTs: 0,
+    syncingSelect: false,
+    output: 'browser',
+    outputs: null,          // cached /api/atc/outputs list
+    localBtn: document.getElementById('atc-local'),
+    castBtn: document.getElementById('atc-cast'),
+    airplayBtn: document.getElementById('atc-airplay'),
+    pop: document.getElementById('atc-pop'),
+};
+
+async function atcPost(url, body) {
+    try {
+        return await (await fetch(url, {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {})})).json();
+    } catch (e) { return null; }
+}
+
+async function atcFetchOutputs(rescan) {
+    try {
+        const r = await fetch('/api/atc/outputs' + (rescan ? '?rescan=1' : ''));
+        ATC.outputs = (await r.json()).outputs || [];
+    } catch (e) { ATC.outputs = ATC.outputs || []; }
+    return ATC.outputs;
+}
+
+// Output icons: standard Cast/AirPlay glyphs open a target popover; the
+// local button flips this-browser <-> Pi USB speaker. Active output glows.
+function atcRenderOutputs() {
+    const out = ATC.output;
+    ATC.localBtn.classList.toggle('active', out === 'browser' || out === 'usb');
+    ATC.castBtn.classList.toggle('active', out.startsWith('chromecast'));
+    ATC.airplayBtn.classList.toggle('active', out.startsWith('airplay'));
+    document.getElementById('atc-local-browser').style.display = (out === 'usb') ? 'none' : '';
+    document.getElementById('atc-local-usb').style.display = (out === 'usb') ? '' : 'none';
+    ATC.localBtn.title = out === 'usb' ? 'Playing on Pi speaker — click for this device'
+                                       : 'Playing in browser — click for Pi speaker';
+}
+
+async function atcSelectOutput(id) {
+    ATC.pop.classList.remove('show');
+    await atcPost('/api/atc/select-output', {output: id});
+    if (id === 'browser') {
+        ATC.wantOn = true; localStorage.setItem('atc_want_on', '1');
+    } else {
+        // Remote/Pi-side output: make sure the server is playing on it.
+        await atcPost('/api/atc/start');
+        if (id.startsWith('airplay:')) atcWatchPairing(id);
+    }
+}
+
+// AirPlay receivers that require authorization (Mac, Apple TV, HomePod) 470
+// the stream until paired; the backend stops (no code-screen storm) and sets
+// airplay_needs_pairing. Watch for that after selecting an AirPlay output and
+// walk the user through the code prompts right here on the mirror.
+async function atcWatchPairing(id) {
+    const ident = id.split(':').slice(1).join(':');
+    // Poll the full window for the definitive needs-pairing flag. We can't
+    // early-out on `playing` because the server keeps playing:true after an
+    // auth-stop, and the flag can land as late as ~8s in (5s scan + connect +
+    // stream error) — a `playing`-based shortcut would race past the prompt.
+    // 30s window: a slow Apple TV's 470 (5s scan + connect + stream setup)
+    // routinely lands after the old 15s cut-off.
+    for (let i = 0; i < 20; i++) {
+        await new Promise(res => setTimeout(res, 1500));
+        let st = null;
+        try { st = await (await fetch('/api/atc/status')).json(); } catch (e) { return; }
+        if (!st || st.output !== id) return;      // user moved on
+        if (st.airplay_needs_pairing === ident) { await atcPairFlow(id); return; }
+    }
+}
+
+async function atcPairFlow(id) {
+    if (!confirm('This AirPlay device asks for a code before it will play. Pair now?')) return;
+    let r = await atcPost('/api/atc/airplay/pair', {output: id});
+    // Slow receivers (Apple TV) outlast begin's server-side wait and come
+    // back as "starting" — poll until the code is on the device's screen.
+    for (let i = 0; i < 30 && r && r.stage === 'starting'; i++) {
+        await new Promise(res => setTimeout(res, 1000));
+        r = await atcPost('/api/atc/airplay/pair', {status: true});
+    }
+    while (r && r.stage === 'awaiting_pin') {
+        const which = r.protocol ? ' (' + r.protocol + ')' : '';
+        const pin = prompt('Enter the code shown on the AirPlay device' + which + ':');
+        if (!pin) { atcPost('/api/atc/airplay/pair', {cancel: true}); return; }
+        r = await atcPost('/api/atc/airplay/pair', {pin});
+    }
+    if (r && r.stage === 'paired') {
+        await atcPost('/api/atc/start');           // retry the stream, now authorized
+    } else {
+        alert('Pairing failed: ' + (r && r.error || 'unknown'));
+    }
+}
+
+function atcShowPop(type) {
+    const items = (ATC.outputs || []).filter(o => o.type === type);
+    ATC.pop.innerHTML = '';
+    if (!items.length) {
+        const d = document.createElement('div');
+        d.className = 'item';
+        d.textContent = 'No devices found — rescan';
+        d.onclick = async () => { await atcFetchOutputs(true); atcShowPop(type); };
+        ATC.pop.appendChild(d);
+    }
+    for (const o of items) {
+        const d = document.createElement('div');
+        d.className = 'item' + (o.id === ATC.output ? ' current' : '');
+        d.textContent = (o.id === ATC.output ? '✓ ' : '') + o.name;
+        d.onclick = () => atcSelectOutput(o.id);
+        ATC.pop.appendChild(d);
+    }
+    ATC.pop.classList.add('show');
+}
+
+ATC.castBtn.onclick = async (e) => {
+    e.stopPropagation();
+    if (ATC.pop.classList.contains('show')) { ATC.pop.classList.remove('show'); return; }
+    if (!ATC.outputs) await atcFetchOutputs(false);
+    atcShowPop('chromecast');
+};
+ATC.airplayBtn.onclick = async (e) => {
+    e.stopPropagation();
+    if (ATC.pop.classList.contains('show')) { ATC.pop.classList.remove('show'); return; }
+    if (!ATC.outputs) await atcFetchOutputs(false);
+    atcShowPop('airplay');
+};
+ATC.localBtn.onclick = (e) => {
+    e.stopPropagation();
+    atcSelectOutput(ATC.output === 'browser' ? 'usb' : 'browser');
+};
+document.addEventListener('click', () => ATC.pop.classList.remove('show'));
+
+// O2: populate the station dropdown — Auto first, then nearest airports'
+// live feeds in distance order (server list is passive: no LiveATC traffic).
+// Refreshed every 10 min: a once-per-load list goes stale across seed
+// deploys and dead-feed discoveries (a stale option once offered a
+// long-removed mount -> instant ERR on selection).
+async function atcLoadNearby() {
+    const now = Date.now();
+    if (ATC.nearbyTs && now - ATC.nearbyTs < 600000) return;
+    ATC.nearbyTs = now;
+    try {
+        const r = await fetch('/api/atc/stations?nearby=1');
+        const nearby = (await r.json()).nearby || [];
+        const cur = ATC.select.value;
+        [...ATC.select.querySelectorAll('option')].forEach(o => {
+            if (o.value !== 'auto') o.remove();
+        });
+        for (const ap of nearby) {
+            for (const f of ap.feeds) {
+                const opt = document.createElement('option');
+                opt.value = 'station:' + f.code;
+                opt.textContent = `${ap.icao} ${f.label} · ${ap.dist_mi}mi`;
+                ATC.select.appendChild(opt);
+            }
+        }
+        if ([...ATC.select.options].some(o => o.value === cur)) ATC.select.value = cur;
+    } catch (e) { ATC.nearbyTs = 0; }
+}
+
+function atcSyncSelect(atc) {
+    // Reflect server state without firing the change handler.
+    ATC.syncingSelect = true;
+    let want = 'auto';
+    if (atc.mode === 'manual' && atc.station) {
+        want = 'station:' + atc.station;
+        if (![...ATC.select.options].some(o => o.value === want)) {
+            const opt = document.createElement('option');
+            opt.value = want;
+            opt.textContent = atc.station.toUpperCase().replace(/_/g, ' ');
+            ATC.select.appendChild(opt);
+        }
+    }
+    if (ATC.select.value !== want) ATC.select.value = want;
+    ATC.syncingSelect = false;
+}
+
+ATC.select.onchange = () => {
+    if (ATC.syncingSelect) return;
+    const v = ATC.select.value;
+    ATC.wantOn = true; localStorage.setItem('atc_want_on', '1');
+    ATC.errCount = 0;  // new station choice re-arms the retry budget
+    const req = v === 'auto'
+        ? fetch('/api/atc/mode', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode: 'auto'})})
+        : fetch('/api/atc/station', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({station: v.slice(8)})});
+    req.then(() => fetch('/api/atc/start', {method: 'POST',
+            headers: {'Content-Type': 'application/json'}, body: '{}'}))
+       .catch(() => {});
+    // The next poll delivers the new stream_url; wantOn resumes playback
+    // (resume overlay covers an autoplay block).
+};
+
+function atcApply(atc) {
+    // Bar shows whenever ATC is enabled \u2014 ANY output, INCLUDING mode off, so
+    // there is always a visible play button and output picker. Browser audio
+    // only plays in-tab when the browser output is selected; for Pi-side/cast
+    // outputs the play button drives the server instead.
+    if (!atc || atc.enabled === false) {
+        ATC.bar.classList.remove('show');
+        atcStop();
+        return;
+    }
+    ATC.bar.classList.add('show');
+    atcLoadNearby();
+    atcSyncSelect(atc);
+    ATC.serverPlaying = !!atc.playing;
+    ATC.quiet = !!atc.in_quiet_hours;
+    ATC.output = atc.output || 'browser';
+    ATC.label = atc.station_label || '';
+    if (ATC.playing) atcSetMediaSession();   // reflect a mid-listen re-tune
+    atcRenderOutputs();
+    // The select shows the target; meta shows what auto actually tuned.
+    ATC.meta.textContent = (atc.mode === 'auto' && atc.station)
+        ? (atc.station || '').toUpperCase().replace(/_/g, ' ') : '';
+    if (ATC.output !== 'browser') {
+        // Audio is on a speaker/cast device, never in this tab.
+        if (ATC.playing) atcStop();
+        ATC.resume.classList.remove('show');
+        atcRender();
+        return;
+    }
+    if (!atc.stream_url) {
+        // Nothing tunable yet (mode off / no station). Keep the bar + button;
+        // a click POSTs /api/atc/start and the next poll delivers the stream.
+        if (ATC.playing) atcStop();
+        ATC.curUrl = '';
+        atcRender();
+        return;
+    }
+    if (atc.stream_url !== ATC.curUrl) {
+        ATC.curUrl = atc.stream_url;
+        if (ATC.playing) atcStart(true);  // re-point to the new station
+    }
+    if (!atc.playing) {
+        // Server-side stopped (quiet hours or explicit stop): stop local
+        // audio too, but keep the bar visible \u2014 a click on play overrides
+        // (POSTs /api/atc/start, which sets the quiet-hours override).
+        if (ATC.playing) atcStop();
+    } else if (ATC.wantOn && !ATC.playing) {
+        // Server wants audio and so does the user (e.g. after a reload):
+        // try to resume; browsers may block until a gesture -> show overlay.
+        atcTryResume();
+    }
+    atcRender();
+}
+
+// Show 'now playing' on the OS media UI (lock screen, media keys) when the
+// mirror is the audio source. Cast/AirPlay receivers get their label from the
+// server side instead.
+function atcSetMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+            title: ATC.label || 'ATC radio',
+            artist: 'LiveATC',
+            album: 'Flight Tracker',
+        });
+    } catch (e) { /* MediaMetadata unsupported */ }
+}
+
+function atcStart(force) {
+    if (!ATC.curUrl) return;
+    if (force) { ATC.audioEl.pause(); ATC.audioEl.removeAttribute('src'); }
+    if (ATC.audioEl.src !== ATC.curUrl) ATC.audioEl.src = ATC.curUrl;
+    const p = ATC.audioEl.play();
+    if (p && p.then) {
+        p.then(() => {
+            ATC.playing = true; ATC.streamErr = false; ATC.errCount = 0;
+            ATC.resume.classList.remove('show'); atcSetMediaSession(); atcRender();
+        }).catch((err) => {
+            ATC.playing = false;
+            // Only the autoplay-policy case is fixable by a click — show the
+            // resume overlay for that alone. A dead/unreachable stream shows
+            // ERR in the bar instead (a modal that can never succeed reads
+            // as "stuck"); the poll loop retries with exponential backoff.
+            const blocked = err && err.name === 'NotAllowedError';
+            ATC.streamErr = !blocked;
+            if (!blocked) ATC.errCount++;
+            if (blocked && ATC.wantOn) ATC.resume.classList.add('show');
+            else ATC.resume.classList.remove('show');
+            atcRender();
+        });
+    }
+}
+
+function atcStop() {
+    ATC.audioEl.pause();
+    ATC.playing = false;
+    ATC.resume.classList.remove('show');
+    atcRender();
+}
+
+// Mid-listen stream death (icecast drop, network blip) surfaces as an
+// error/ended/stalled event on the element — the play() promise only covers
+// STARTUP failures, so without these a dead stream sat silent with the bar
+// still saying LIVE. Mirror atcStart's .catch bookkeeping; the poll loop's
+// atcTryResume backoff machinery then recovers.
+for (const ev of ['error', 'ended', 'stalled']) {
+    ATC.audioEl.addEventListener(ev, () => {
+        if (!ATC.playing) return;  // teardown/src-swap noise, not a live failure
+        ATC.playing = false;
+        ATC.streamErr = true;
+        ATC.errCount++;
+        atcRender();
+    });
+}
+
+function atcTryResume() {
+    // Attempt silent resume; if blocked, the overlay prompts a click.
+    // EXPONENTIAL backoff on stream errors: a flat 15s retry against a
+    // persistently dead mount re-request-hammered LiveATC for hours and got
+    // the household IP banned a second time. 15s doubling to a 5-min cap,
+    // and after 15 straight failures stop entirely until a user gesture.
+    const now = Date.now();
+    if (ATC.streamErr) {
+        if (ATC.errCount >= 15) return;
+        const wait = Math.min(300000, 15000 * Math.pow(2, Math.max(0, ATC.errCount - 1)));
+        if (now - (ATC.lastTryTs || 0) < wait) return;
+    }
+    ATC.lastTryTs = now;
+    atcStart(false);
+}
+
+function atcRender() {
+    const active = ATC.output === 'browser' ? ATC.playing : ATC.serverPlaying;
+    ATC.toggle.textContent = active ? '\u23f8 ATC' : '\u25b6 ATC';
+    ATC.live.textContent = active ? 'LIVE'
+        : (ATC.streamErr ? 'ERR' : (ATC.quiet ? 'QUIET' : ''));
+}
+
+ATC.toggle.onclick = () => {
+    if (ATC.output !== 'browser') {
+        // Pi-side/cast output: the button is a server-side play/stop.
+        atcPost(ATC.serverPlaying ? '/api/atc/stop' : '/api/atc/start');
+        // Pressing play on an unpaired AirPlay target 470s server-side —
+        // watch for the needs-pairing flag here too, not just on output
+        // selection, so the pairing prompt still appears.
+        if (!ATC.serverPlaying && ATC.output.startsWith('airplay:')) {
+            atcWatchPairing(ATC.output);
+        }
+        return;
+    }
+    if (ATC.playing) {
+        ATC.wantOn = false; localStorage.setItem('atc_want_on', '0');
+        atcStop();
+    } else {
+        ATC.wantOn = true; localStorage.setItem('atc_want_on', '1');
+        ATC.errCount = 0;  // explicit gesture re-arms the retry budget
+        // If the server side is stopped (quiet hours / explicit stop), this
+        // click IS the override: tell the manager to start and play locally
+        // in the same gesture (autoplay policy needs the gesture context).
+        if (!ATC.serverPlaying) atcPost('/api/atc/start');
+        atcStart(false);
+    }
+};
+// Any click on the resume overlay counts as the gesture to restart audio.
+ATC.resume.onclick = () => { ATC.errCount = 0; atcStart(false); };
+
+async function poll() {
+    try {
+        const r = await fetch('/api/display-state');
+        if (!r.ok) throw new Error(r.status);
+        state = await r.json();
+        const n = state.flights?.length || 0;
+
+        // Clock skew FIRST \u2014 this underpins serverNow(), which drives ALL
+        // scroll/page/timing sync. It must update on every successful poll and
+        // never be skippable. It used to sit AFTER atcApply() in this try, so a
+        // throw there (any ATC-bar edit) stranded clockOffset at 0 \u2192 serverNow()
+        // became the raw browser clock \u2192 the whole mirror drifted by the
+        // browser-vs-Pi skew. Averaged over recent polls for stability.
+        if (state.server_time) {
+            clockOffsets.push(state.server_time - (Date.now() / 1000));
+            if (clockOffsets.length > 10) clockOffsets.shift();
+            clockOffset = clockOffsets.reduce((a,b) => a+b, 0) / clockOffsets.length;
+        }
+
+        // Self-heal long-lived tabs: reload when a deploy changes the UI. If the
+        // user had ATC audio on, remember it so the reloaded page re-prompts to
+        // resume (autoplay policy kills playback across a reload) \u2014 review note 2.
+        if (window.__uiVersion && state.ui_version
+                && state.ui_version !== window.__uiVersion) {
+            if (ATC.playing || ATC.wantOn) localStorage.setItem('atc_want_on', '1');
+            location.reload();
+            return;
+        }
+        window.__uiVersion = state.ui_version;
+
+        // ATC audio state (folded into display-state \u2014 single poll, note 4).
+        // Isolated: an ATC-bar error must never break the mirror's core sync
+        // (clock skew above, status below) \u2014 the bug that desynced the mirror.
+        try { atcApply(state.atc); } catch (e) { console.error('atcApply failed:', e); }
+        document.getElementById('status').textContent =
+            'Connected \u2022 ' + n + ' flight' + (n !== 1 ? 's' : '');
+        document.getElementById('status').className = 'status connected';
+    } catch (e) {
+        document.getElementById('status').textContent = 'Error: ' + e.message;
+        document.getElementById('status').className = 'status error';
+    }
+}
+
+let pollInterval = null;
+function startPolling() {
+    if (pollInterval) return;
+    poll(); pollInterval = setInterval(poll, POLL_MS);
+}
+function stopPolling() {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+}
+document.addEventListener('visibilitychange', () => {
+    document.hidden ? stopPolling() : startPolling();
+});
+
+startPolling(); tick();
+
+// Load location label (one-time)
+fetch('/airport-code').then(r=>r.json()).then(d=>{
+    const el = document.getElementById('location');
+    if (d.name && d.code) el.textContent = d.name + ' (' + d.code + ')';
+    else if (d.name) el.textContent = d.name;
+}).catch(()=>{});
+</script>
+</body>
+</html>

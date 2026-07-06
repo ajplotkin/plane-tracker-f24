@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Flight Tracker Config</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Share Tech Mono', 'Courier New', monospace;
+            background: #0d0d0b;
+            color: #ffb000;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0,0,0,0.03) 0px,
+                rgba(0,0,0,0.03) 2px,
+                transparent 2px,
+                transparent 4px
+            );
+            pointer-events: none;
+            z-index: 100;
+        }
+        h1 {
+            font-family: 'VT323', 'Courier New', monospace;
+            font-size: 28px;
+            margin-bottom: 6px;
+            color: #ffd54f;
+            text-shadow: 0 0 10px rgba(255,180,0,0.3);
+        }
+        .subtitle {
+            font-size: 13px;
+            color: #806000;
+            margin-bottom: 20px;
+        }
+        .nav {
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        .nav a {
+            color: #ffb000;
+            text-decoration: none;
+            margin-right: 16px;
+        }
+        .nav a:hover { text-decoration: underline; }
+
+        .section {
+            border: 1px solid #333;
+            margin-bottom: 16px;
+            background: #111;
+        }
+        .section-header {
+            background: #1a1a1a;
+            padding: 8px 14px;
+            font-family: 'VT323', 'Courier New', monospace;
+            font-size: 18px;
+            color: #ffb000;
+            border-bottom: 1px solid #333;
+            cursor: pointer;
+            user-select: none;
+        }
+        .section-header:hover { background: #222; }
+        .section-header::before { content: '▼ '; font-size: 10px; }
+        .section.collapsed .section-header::before { content: '▶ '; }
+        .section.collapsed .section-body { display: none; }
+        .section-body {
+            padding: 12px 14px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0 24px;
+        }
+        @media (max-width: 700px) {
+            .section-body { grid-template-columns: 1fr; }
+        }
+
+        .field {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            gap: 12px;
+        }
+        .field label {
+            flex: 0 0 200px;
+            font-size: 13px;
+            color: #cc8800;
+        }
+        .field input[type="text"],
+        .field input[type="number"],
+        .field input[type="password"] {
+            background: #0a0a0a;
+            border: 1px solid #444;
+            color: #ffb000;
+            font-family: 'Share Tech Mono', 'Courier New', monospace;
+            font-size: 14px;
+            padding: 5px 8px;
+            flex: 1;
+            max-width: 300px;
+        }
+        .field input:focus {
+            outline: none;
+            border-color: #ffb000;
+        }
+        .field select {
+            background: #0a0a0a;
+            border: 1px solid #444;
+            color: #ffb000;
+            font-family: 'Share Tech Mono', 'Courier New', monospace;
+            font-size: 14px;
+            padding: 5px 8px;
+        }
+        .field .hint {
+            font-size: 11px;
+            color: #555;
+        }
+
+        .checkbox-field {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            gap: 8px;
+        }
+        .checkbox-field input[type="checkbox"] {
+            accent-color: #ffb000;
+            width: 16px;
+            height: 16px;
+        }
+        .checkbox-field label {
+            font-size: 13px;
+            color: #cc8800;
+        }
+
+        .btn-bar {
+            position: sticky;
+            bottom: 0;
+            background: #0a0a0a;
+            border-top: 1px solid #333;
+            margin-top: 20px;
+            padding: 12px 0;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            z-index: 10;
+        }
+        button {
+            font-family: 'VT323', 'Courier New', monospace;
+            font-size: 18px;
+            padding: 8px 20px;
+            cursor: pointer;
+            border: 1px solid #ffb000;
+            background: #1a1a1a;
+            color: #ffb000;
+        }
+        button:hover { background: #2a2000; }
+        button.primary {
+            background: #ffb000;
+            color: #000;
+            font-weight: bold;
+        }
+        button.primary:hover { background: #ffc030; }
+        button.danger {
+            border-color: #ff4444;
+            color: #ff4444;
+        }
+        button.danger:hover { background: #2a0000; }
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        #save-status {
+            font-size: 13px;
+            margin-left: 12px;
+        }
+        .status-ok { color: #4caf50; }
+        .status-err { color: #ff4444; }
+        .status-warn { color: #ffb000; }
+
+        .system-panel {
+            border: 1px solid #333;
+            background: #111;
+            padding: 12px 14px;
+            margin-bottom: 16px;
+            font-size: 13px;
+        }
+        .system-panel .stat {
+            display: inline-block;
+            margin-right: 24px;
+            color: #806000;
+        }
+        .system-panel .stat span { color: #ffb000; }
+
+        .secret-toggle {
+            font-size: 11px;
+            color: #555;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+        .secret-toggle:hover { color: #ffb000; }
+    </style>
+</head>
+<body>
+    <h1>FLIGHT TRACKER CONFIG</h1>
+    <div class="subtitle">Configuration editor — changes take effect on save</div>
+    <div class="nav">
+        <a href="/">← Dashboard</a>
+        <a href="/stats">Stats</a>
+        <a href="/display">Display</a>
+        <a href="/usage">API Usage</a>
+    </div>
+
+    <!-- System Status -->
+    <div class="system-panel" id="system-panel">
+        <div class="stat">PI: <span id="sys-uptime">—</span></div>
+        <div class="stat">APP: <span id="sys-service-uptime">—</span></div>
+        <div class="stat">CPU: <span id="sys-cpu">—</span></div>
+        <div class="stat">LOAD: <span id="sys-load">—</span></div>
+        <div class="stat">CONFIG: <span id="sys-config-source">—</span></div>
+    </div>
+
+    <!-- Location & Zone -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">LOCATION &amp; ZONE</div>
+        <div class="section-body">
+            <div class="field">
+                <label>HOME_LAT</label>
+                <input type="text" id="cfg-HOME_LAT" placeholder="40.7128" />
+            </div>
+            <div class="field">
+                <label>HOME_LON</label>
+                <input type="text" id="cfg-HOME_LON" placeholder="-74.0060" />
+            </div>
+            <div class="field">
+                <label>ZONE_TL_LAT</label>
+                <input type="text" id="cfg-ZONE_TL_LAT" placeholder="Top-left latitude" />
+            </div>
+            <div class="field">
+                <label>ZONE_TL_LON</label>
+                <input type="text" id="cfg-ZONE_TL_LON" placeholder="Top-left longitude" />
+            </div>
+            <div class="field">
+                <label>ZONE_BR_LAT</label>
+                <input type="text" id="cfg-ZONE_BR_LAT" placeholder="Bottom-right latitude" />
+            </div>
+            <div class="field">
+                <label>ZONE_BR_LON</label>
+                <input type="text" id="cfg-ZONE_BR_LON" placeholder="Bottom-right longitude" />
+            </div>
+            <div class="field">
+                <label>JOURNEY_CODE_SELECTED</label>
+                <input type="text" id="cfg-JOURNEY_CODE_SELECTED" placeholder="EWR" />
+                <span class="hint">Nearest airport code</span>
+            </div>
+            <div class="field">
+                <label>TEMPERATURE_LOCATION</label>
+                <input type="text" id="cfg-TEMPERATURE_LOCATION" placeholder="40.7,-74.0" />
+            </div>
+            <div class="field">
+                <label>TIDE_STATION</label>
+                <input type="text" id="cfg-TIDE_STATION" placeholder="9414290" />
+                <span class="hint">NOAA station ID (empty = no tides)</span>
+            </div>
+            <div class="field">
+                <label>WATER_TEMP_STATION</label>
+                <input type="text" id="cfg-WATER_TEMP_STATION" placeholder="9410230" />
+                <span class="hint">NOAA station ID (empty = none)</span>
+            </div>
+            <div class="field">
+                <label>AIRPORT_STATUS_LIST</label>
+                <input type="text" id="cfg-AIRPORT_STATUS_LIST" placeholder="JFK,LGA,EWR" />
+                <span class="hint">FAA delay alerts (comma-separated IATA codes)</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Display -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">DISPLAY</div>
+        <div class="section-body">
+            <div class="field">
+                <label>DISTANCE_UNITS</label>
+                <select id="cfg-DISTANCE_UNITS">
+                    <option value="metric">metric (KM)</option>
+                    <option value="imperial">imperial (mi)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>SPEED_UNITS</label>
+                <select id="cfg-SPEED_UNITS">
+                    <option value="knots">knots</option>
+                    <option value="imperial">imperial (mph)</option>
+                    <option value="metric">metric (km/h)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>TEMPERATURE_UNITS</label>
+                <select id="cfg-TEMPERATURE_UNITS">
+                    <option value="metric">metric (°C)</option>
+                    <option value="imperial">imperial (°F)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>CLOCK_FORMAT</label>
+                <select id="cfg-CLOCK_FORMAT">
+                    <option value="24hr">24hr</option>
+                    <option value="12hr">12hr</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>BRIGHTNESS</label>
+                <input type="number" id="cfg-BRIGHTNESS" min="1" max="100" placeholder="100" />
+                <span class="hint">1-100</span>
+            </div>
+            <div class="field">
+                <label>GPIO_SLOWDOWN</label>
+                <input type="number" id="cfg-GPIO_SLOWDOWN" min="1" max="5" placeholder="2" />
+            </div>
+            <div class="field">
+                <label>LED_RGB_SEQUENCE</label>
+                <select id="cfg-LED_RGB_SEQUENCE">
+                    <option value="RGB">RGB (most panels)</option>
+                    <option value="RBG">RBG (some panels)</option>
+                    <option value="GRB">GRB</option>
+                    <option value="GBR">GBR</option>
+                    <option value="BRG">BRG</option>
+                    <option value="BGR">BGR</option>
+                </select>
+                <span class="hint">Change if colors look wrong — requires restart</span>
+            </div>
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-NIGHT_BRIGHTNESS" />
+                <label for="cfg-NIGHT_BRIGHTNESS">NIGHT_BRIGHTNESS</label>
+            </div>
+            <div class="field">
+                <label>BRIGHTNESS_NIGHT</label>
+                <input type="number" id="cfg-BRIGHTNESS_NIGHT" min="1" max="100" placeholder="50" />
+            </div>
+            <div class="field">
+                <label>NIGHT_START</label>
+                <input type="text" id="cfg-NIGHT_START" placeholder="22:00" />
+            </div>
+            <div class="field">
+                <label>NIGHT_END</label>
+                <input type="text" id="cfg-NIGHT_END" placeholder="06:00" />
+            </div>
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-HAT_PWM_ENABLED" />
+                <label for="cfg-HAT_PWM_ENABLED">HAT_PWM_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Hardware PWM dimming</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flights -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">FLIGHTS</div>
+        <div class="section-body">
+            <div class="field">
+                <label>MIN_ALTITUDE</label>
+                <input type="number" id="cfg-MIN_ALTITUDE" min="0" placeholder="0" />
+                <span class="hint">Filter below (feet)</span>
+            </div>
+            <div class="field">
+                <label>JOURNEY_BLANK_FILLER</label>
+                <input type="text" id="cfg-JOURNEY_BLANK_FILLER" placeholder="?" />
+                <span class="hint">Shows when route unknown</span>
+            </div>
+            <div class="field">
+                <label>FORECAST_DAYS</label>
+                <input type="number" id="cfg-FORECAST_DAYS" min="1" max="7" placeholder="3" />
+            </div>
+            <div class="field">
+                <label>BLOCKED_CALLSIGNS</label>
+                <input type="text" id="cfg-BLOCKED_CALLSIGNS" placeholder="N12345,N67890" />
+                <span class="hint">Comma-separated callsigns to ignore</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">ALERTS</div>
+        <div class="section-body">
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-NWS_ALERTS_ENABLED" checked />
+                <label for="cfg-NWS_ALERTS_ENABLED">NWS_ALERTS_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Weather alerts from NWS</span>
+            </div>
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-ISS_ALERTS_ENABLED" checked />
+                <label for="cfg-ISS_ALERTS_ENABLED">ISS_ALERTS_ENABLED</label>
+                <span class="hint" style="margin-left:8px">ISS overhead pass alerts</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ATC Audio -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">ATC AUDIO</div>
+        <div class="section-body">
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-ATC_ENABLED" />
+                <label for="cfg-ATC_ENABLED">ATC_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Master switch for LiveATC audio (save + restart)</span>
+            </div>
+            <div class="field">
+                <label>ATC_QUIET_HOURS</label>
+                <input type="text" id="cfg-ATC_QUIET_HOURS" placeholder="e.g. 22:00-06:00 (blank = night window)" />
+                <span class="hint">Auto mode won't start audio in this window</span>
+            </div>
+            <div class="field">
+                <label>ATC_CUSTOM_FEEDS</label>
+                <input type="text" id="cfg-ATC_CUSTOM_FEEDS" placeholder="ICAO/kind/mount[/lat/lon], ... e.g. KFRG/twr/kfrg_twr/40.73/-73.41" />
+                <span class="hint">Add stations beyond the seed (kind: twr, app, or ctr). Mount names from liveatc.net — see docs/ATC Seed Update Method.md</span>
+            </div>
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-ATC_AUTO_RESUME" checked />
+                <label for="cfg-ATC_AUTO_RESUME">ATC_AUTO_RESUME</label>
+                <span class="hint" style="margin-left:8px">Resume Pi-side output on restart</span>
+            </div>
+
+            <hr style="border:none;border-top:1px solid #333;margin:14px 0" />
+            <div class="hint" style="margin-bottom:10px">Live controls — apply immediately (no save needed):</div>
+
+            <div class="field">
+                <label>Mode</label>
+                <select id="atc-mode">
+                    <option value="off">Off</option>
+                    <option value="auto">Auto (follow traffic)</option>
+                    <option value="manual">Manual (locked station)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Output</label>
+                <select id="atc-output"></select>
+                <span class="secret-toggle" onclick="atcRescanOutputs()">rescan</span>
+                <span class="secret-toggle" onclick="atcPairAirplay()">pair airplay</span>
+            </div>
+            <div class="field" id="atc-station-field">
+                <label>Station</label>
+                <select id="atc-station"></select>
+            </div>
+            <div class="field">
+                <label>Volume</label>
+                <input type="range" id="atc-volume" min="0" max="100" value="70" />
+                <span class="hint" id="atc-volume-label">70</span>
+            </div>
+            <div class="field">
+                <button id="atc-play" onclick="atcPlayPause()">▶ Start</button>
+                <span class="hint" id="atc-live-status" style="margin-left:8px"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">STATS</div>
+        <div class="section-body">
+            <div class="field">
+                <label>MAX_CLOSEST</label>
+                <input type="number" id="cfg-MAX_CLOSEST" min="1" max="20" placeholder="3" />
+            </div>
+            <div class="field">
+                <label>MAX_FARTHEST</label>
+                <input type="number" id="cfg-MAX_FARTHEST" min="1" max="20" placeholder="3" />
+            </div>
+            <div class="field">
+                <label>STATS_LOG_DAYS</label>
+                <input type="number" id="cfg-STATS_LOG_DAYS" min="7" max="365" placeholder="90" />
+                <span class="hint">Days of flight history to keep</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- API Keys -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">API KEYS</div>
+        <div class="section-body">
+            <div class="field">
+                <label>FR24_API_KEY</label>
+                <input type="password" id="cfg-FR24_API_KEY" placeholder="sub|jwt" />
+                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+            </div>
+            <div class="field">
+                <label>TOMORROW_API_KEY</label>
+                <input type="password" id="cfg-TOMORROW_API_KEY" placeholder="Weather API key" />
+                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+            </div>
+            <div class="field">
+                <label>AIRLABS_API_KEY</label>
+                <input type="password" id="cfg-AIRLABS_API_KEY" placeholder="AirLabs API key" />
+                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+            </div>
+            <div class="field">
+                <label>NPS_API_KEY</label>
+                <input type="password" id="cfg-NPS_API_KEY" placeholder="NPS developer key" />
+                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+            </div>
+            <div class="field">
+                <label>OWM_API_KEY</label>
+                <input type="password" id="cfg-OWM_API_KEY" placeholder="OpenWeatherMap One Call 3.0 key" />
+                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+            </div>
+            <div class="field">
+                <label>EMAIL</label>
+                <input type="text" id="cfg-EMAIL" placeholder="Alert email (optional)" />
+            </div>
+        </div>
+    </div>
+
+    <!-- WiFi (concept from c0wsaysmoo/plane-tracker-rgb-pi) -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">WI-FI</div>
+        <div class="section-body">
+            <div style="display:flex;flex-wrap:wrap;gap:4px 24px;margin-bottom:12px;padding:8px 12px;border:1px solid #333;background:#0d0d0d">
+                <div><span style="font-size:11px;color:#806000">NETWORK</span><br><span id="wifi-ssid" style="color:#ffb000">--</span></div>
+                <div><span style="font-size:11px;color:#806000">IP</span><br><span id="wifi-ip" style="color:#ffb000">--</span></div>
+                <div><span style="font-size:11px;color:#806000">SIGNAL</span><br><span id="wifi-signal" style="color:#ffb000">--</span></div>
+                <div><span style="font-size:11px;color:#806000">STATUS</span><br><span id="wifi-status" style="color:#ffb000">--</span></div>
+            </div>
+            <div style="margin-bottom:8px">
+                <button onclick="wifiScan()" id="wifi-scan-btn" style="font-size:13px;padding:5px 14px">Scan Networks</button>
+                <span id="wifi-scan-hint" style="font-size:11px;color:#555;margin-left:8px"></span>
+            </div>
+            <div id="wifi-network-list" style="display:none;border:1px solid #333;margin-bottom:8px;max-height:200px;overflow-y:auto"></div>
+            <div style="font-size:11px;color:#555;cursor:pointer;margin-top:8px" onclick="document.getElementById('wifi-manual').style.display=document.getElementById('wifi-manual').style.display==='none'?'block':'none'">
+                ▸ Manual entry
+            </div>
+            <div id="wifi-manual" style="display:none;margin-top:8px">
+                <div class="field">
+                    <label>SSID</label>
+                    <input type="text" id="wifi-manual-ssid" placeholder="Network name" />
+                </div>
+                <div class="field">
+                    <label>Password</label>
+                    <input type="password" id="wifi-manual-pw" placeholder="Leave blank for open" />
+                    <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+                </div>
+                <button onclick="wifiConnectManual()" style="margin-top:6px;font-size:13px;padding:5px 14px">Connect</button>
+            </div>
+            <div id="wifi-result" style="display:none;margin-top:10px;padding:8px 12px;font-size:12px;border:1px solid #333"></div>
+            <div id="wifi-switch-warn" style="display:none;margin-top:10px;padding:10px 14px;background:#1a1200;border:1px solid #664400;color:#ffb000;font-size:12px">
+                Warning: connecting to a different network will make this page go offline.
+                Reconnect your device to the new network and find the Pi's new IP.<br><br>
+                <button onclick="wifiConfirmSwitch()" style="font-size:13px;padding:5px 14px">Connect Anyway</button>
+                <button onclick="document.getElementById('wifi-switch-warn').style.display='none'" style="font-size:13px;padding:5px 14px;margin-left:8px">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Buttons -->
+    <div class="btn-bar">
+        <button class="primary" id="save-btn" onclick="saveConfig()" disabled>SAVE CONFIG</button>
+        <button onclick="loadConfig()">RELOAD</button>
+        <button class="danger" onclick="restartApp()">RESTART</button>
+        <span id="save-status"></span>
+    </div>
+
+    <script>
+        // All config field IDs (match env var names)
+        const CONFIG_FIELDS = [
+            'HOME_LAT', 'HOME_LON',
+            'ZONE_TL_LAT', 'ZONE_TL_LON', 'ZONE_BR_LAT', 'ZONE_BR_LON',
+            'JOURNEY_CODE_SELECTED', 'TEMPERATURE_LOCATION', 'TIDE_STATION', 'WATER_TEMP_STATION', 'AIRPORT_STATUS_LIST',
+            'DISTANCE_UNITS', 'SPEED_UNITS', 'TEMPERATURE_UNITS', 'CLOCK_FORMAT',
+            'BRIGHTNESS', 'BRIGHTNESS_NIGHT', 'GPIO_SLOWDOWN', 'LED_RGB_SEQUENCE',
+            'NIGHT_BRIGHTNESS', 'NIGHT_START', 'NIGHT_END', 'HAT_PWM_ENABLED',
+            'MIN_ALTITUDE', 'JOURNEY_BLANK_FILLER', 'FORECAST_DAYS', 'BLOCKED_CALLSIGNS',
+            'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED',
+            'MAX_CLOSEST', 'MAX_FARTHEST', 'STATS_LOG_DAYS',
+            'FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY',
+            'EMAIL',
+            'ATC_ENABLED', 'ATC_QUIET_HOURS', 'ATC_CUSTOM_FEEDS', 'ATC_AUTO_RESUME',
+        ];
+
+        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME'];
+        const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
+
+        function toggleSection(header) {
+            header.parentElement.classList.toggle('collapsed');
+        }
+
+        function toggleSecret(el) {
+            const input = el.previousElementSibling;
+            if (input.type === 'password') {
+                input.type = 'text';
+                el.textContent = 'hide';
+            } else {
+                input.type = 'password';
+                el.textContent = 'show';
+            }
+        }
+
+        function setStatus(msg, cls) {
+            const el = document.getElementById('save-status');
+            el.textContent = msg;
+            el.className = cls;
+            if (msg) setTimeout(() => { el.textContent = ''; el.className = ''; }, 5000);
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+
+                for (const key of CONFIG_FIELDS) {
+                    const el = document.getElementById('cfg-' + key);
+                    if (!el) continue;
+                    const val = data[key];
+                    if (val === undefined || val === null) continue;
+
+                    if (CHECKBOX_FIELDS.includes(key)) {
+                        el.checked = val === true || val === 'True' || val === 'true';
+                    } else if (el.tagName === 'SELECT') {
+                        el.value = val;
+                    } else if (SECRET_FIELDS.includes(key) && val && val.includes('*')) {
+                        el.placeholder = val;  // Show masked version as placeholder
+                    } else {
+                        el.value = val;
+                    }
+                }
+
+                setStatus('Config loaded', 'status-ok');
+                markClean();
+            } catch (e) {
+                setStatus('Failed to load config: ' + e.message, 'status-err');
+            }
+        }
+
+        async function saveConfig() {
+            const payload = {};
+
+            for (const key of CONFIG_FIELDS) {
+                const el = document.getElementById('cfg-' + key);
+                if (!el) continue;
+
+                if (CHECKBOX_FIELDS.includes(key)) {
+                    payload[key] = el.checked;
+                } else if (SECRET_FIELDS.includes(key)) {
+                    // Only send if user actually typed something (not masked placeholder)
+                    if (el.value && !el.value.includes('*')) {
+                        payload[key] = el.value;
+                    }
+                } else {
+                    const val = el.value.trim();
+                    if (val !== '') payload[key] = val;
+                }
+            }
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setStatus('Config saved — restart service to apply', 'status-ok');
+                    markClean();
+                } else {
+                    setStatus('Save failed: ' + (data.error || 'unknown'), 'status-err');
+                }
+            } catch (e) {
+                setStatus('Save failed: ' + e.message, 'status-err');
+            }
+        }
+
+        async function loadSystem() {
+            try {
+                const res = await fetch('/api/system');
+                const data = await res.json();
+                document.getElementById('sys-uptime').textContent = data.uptime || '—';
+                document.getElementById('sys-service-uptime').textContent = data.service_uptime || '—';
+                document.getElementById('sys-cpu').textContent = data.cpu_temp || '—';
+                document.getElementById('sys-load').textContent = data.load_avg || '—';
+                document.getElementById('sys-config-source').textContent = data.config_source || 'env';
+            } catch (e) {}
+        }
+
+        // ── WiFi Management (concept from c0wsaysmoo/plane-tracker-rgb-pi) ──
+        let _wifiCurrentSsid = null;
+        let _wifiPendingSsid = null;
+        let _wifiPendingPw = null;
+
+        function signalBars(pct) {
+            if (pct >= 80) return '\u2582\u2584\u2586\u2588';
+            if (pct >= 55) return '\u2582\u2584\u2586\u00b7';
+            if (pct >= 30) return '\u2582\u2584\u00b7\u00b7';
+            if (pct >= 10) return '\u2582\u00b7\u00b7\u00b7';
+            return '\u00b7\u00b7\u00b7\u00b7';
+        }
+
+        function wifiResult(msg, color) {
+            const el = document.getElementById('wifi-result');
+            el.textContent = msg;
+            el.style.display = 'block';
+            el.style.color = color || '#ffb000';
+            el.style.borderColor = color || '#333';
+        }
+
+        async function wifiLoadStatus() {
+            try {
+                const d = await (await fetch('/api/wifi/status')).json();
+                if (d.error) throw new Error(d.error);
+                _wifiCurrentSsid = d.connected_ssid || null;
+                document.getElementById('wifi-ssid').textContent = d.connected_ssid || 'NOT CONNECTED';
+                document.getElementById('wifi-ssid').style.color = d.connected_ssid ? '#4caf50' : '#ff4444';
+                document.getElementById('wifi-ip').textContent = d.ip_address || '--';
+                document.getElementById('wifi-status').textContent = d.connected_ssid ? 'CONNECTED' : 'DISCONNECTED';
+                document.getElementById('wifi-status').style.color = d.connected_ssid ? '#4caf50' : '#ff4444';
+                const cur = (d.networks || []).find(n => n.active);
+                document.getElementById('wifi-signal').textContent = cur ? signalBars(cur.signal) + ' ' + cur.signal + '%' : '--';
+            } catch (e) {
+                document.getElementById('wifi-status').textContent = 'N/A';
+            }
+        }
+
+        async function wifiScan() {
+            const btn = document.getElementById('wifi-scan-btn');
+            const hint = document.getElementById('wifi-scan-hint');
+            btn.disabled = true;
+            btn.textContent = 'Scanning...';
+            hint.textContent = '';
+            document.getElementById('wifi-network-list').style.display = 'none';
+            try {
+                const d = await (await fetch('/api/wifi/scan')).json();
+                if (d.error) throw new Error(d.error);
+                const list = document.getElementById('wifi-network-list');
+                list.innerHTML = '';
+                (d.networks || []).forEach(net => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid #222;cursor:pointer;font-size:13px';
+                    if (net.active) row.style.borderLeft = '3px solid #4caf50';
+                    row.innerHTML = '<span style="font-size:14px;letter-spacing:-1px">' + signalBars(net.signal) + '</span>' +
+                        '<span style="flex:1;color:' + (net.active ? '#4caf50' : '#ffb000') + '">' + net.ssid + (net.active ? ' \u2713' : '') + '</span>' +
+                        '<span style="font-size:11px;color:#555">' + (net.security && net.security !== '--' ? '\ud83d\udd12' : '') + ' ' + net.signal + '%</span>';
+                    if (!net.active) row.addEventListener('click', () => wifiSelectNetwork(net));
+                    row.addEventListener('mouseover', () => { if (!net.active) row.style.background = 'rgba(255,176,0,0.05)'; });
+                    row.addEventListener('mouseout', () => row.style.background = '');
+                    list.appendChild(row);
+                });
+                list.style.display = 'block';
+                hint.textContent = (d.networks || []).length + ' networks found';
+            } catch (e) {
+                hint.textContent = 'Scan failed: ' + e.message;
+            }
+            btn.disabled = false;
+            btn.textContent = 'Scan Networks';
+        }
+
+        function wifiSelectNetwork(net) {
+            _wifiPendingSsid = net.ssid;
+            _wifiPendingPw = null;
+            document.getElementById('wifi-result').style.display = 'none';
+            document.getElementById('wifi-switch-warn').style.display = 'none';
+            if (net.security && net.security !== '--') {
+                document.getElementById('wifi-manual-ssid').value = net.ssid;
+                document.getElementById('wifi-manual-pw').value = '';
+                document.getElementById('wifi-manual').style.display = 'block';
+                document.getElementById('wifi-manual-pw').focus();
+                wifiResult('Selected: ' + net.ssid + ' — enter password and click Connect', '#ffb000');
+                return;
+            }
+            if (net.ssid !== _wifiCurrentSsid) {
+                document.getElementById('wifi-switch-warn').style.display = 'block';
+                return;
+            }
+            wifiDoConnect(net.ssid, '');
+        }
+
+        function wifiConnectManual() {
+            const ssid = document.getElementById('wifi-manual-ssid').value.trim();
+            const pw = document.getElementById('wifi-manual-pw').value;
+            if (!ssid) { wifiResult('Enter an SSID', '#ff4444'); return; }
+            _wifiPendingSsid = ssid;
+            _wifiPendingPw = pw;
+            if (ssid !== _wifiCurrentSsid) {
+                document.getElementById('wifi-switch-warn').style.display = 'block';
+                return;
+            }
+            wifiDoConnect(ssid, pw);
+        }
+
+        function wifiConfirmSwitch() {
+            document.getElementById('wifi-switch-warn').style.display = 'none';
+            wifiDoConnect(_wifiPendingSsid, _wifiPendingPw || document.getElementById('wifi-manual-pw').value);
+        }
+
+        async function wifiDoConnect(ssid, password) {
+            wifiResult('Connecting to ' + ssid + '...', '#ffb000');
+            try {
+                const d = await (await fetch('/api/wifi/connect', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ssid, password}),
+                })).json();
+                if (d.switched) {
+                    wifiResult('Connecting — Pi may have switched networks. Reconnect and find its new IP.', '#ffb000');
+                } else if (d.success) {
+                    wifiResult('Connected to ' + ssid, '#4caf50');
+                    wifiLoadStatus();
+                } else {
+                    wifiResult('Failed: ' + (d.error || 'unknown'), '#ff4444');
+                }
+            } catch (e) {
+                wifiResult('Connection in progress — page may be offline (Pi switched networks).', '#ffb000');
+            }
+            _wifiPendingSsid = _wifiPendingPw = null;
+        }
+
+        async function restartApp() {
+            if (!confirm('Restart the flight tracker?')) return;
+            setStatus('Restarting...', 'status-warn');
+            try {
+                const res = await fetch('/api/restart', { method: 'POST' });
+                const data = await res.json();
+                if (res.ok) {
+                    setStatus('Restarting — page will reconnect...', 'status-ok');
+                    // Poll until the server comes back (give up after ~30s)
+                    let retries = 0;
+                    setTimeout(function poll() {
+                        if (retries++ > 15) {
+                            setStatus('Restart may have failed — check the Pi manually', 'status-err');
+                            return;
+                        }
+                        fetch('/api/system').then(() => location.reload()).catch(() => setTimeout(poll, 2000));
+                    }, 3000);
+                } else {
+                    setStatus('Restart failed: ' + (data.error || 'unknown'), 'status-err');
+                }
+            } catch (e) {
+                setStatus('Restart failed: ' + e.message, 'status-err');
+            }
+        }
+
+        // Dirty tracking — enable Save only when form has unsaved changes
+        let _formDirty = false;
+        function markDirty() {
+            _formDirty = true;
+            document.getElementById('save-btn').disabled = false;
+        }
+        function markClean() {
+            _formDirty = false;
+            document.getElementById('save-btn').disabled = true;
+        }
+
+        // ── ATC live controls (apply immediately via /api/atc/*) ───────────
+        let _atcStations = [];
+        let _atcNearby = [];
+        async function atcLoad() {
+            try {
+                const [statusRes, outsRes, staRes, nearRes] = await Promise.all([
+                    fetch('/api/atc/status'),
+                    fetch('/api/atc/outputs'),
+                    fetch('/api/atc/stations'),
+                    fetch('/api/atc/stations?nearby=1'),
+                ]);
+                const status = await statusRes.json();
+                const outs = (await outsRes.json()).outputs || [];
+                _atcStations = (await staRes.json()).stations || [];
+                _atcNearby = (await nearRes.json()).nearby || [];
+                atcFillOutputs(outs, status.output);
+                atcFillStations(status.station);
+                document.getElementById('atc-mode').value = status.mode || 'off';
+                document.getElementById('atc-volume').value = status.volume ?? 70;
+                document.getElementById('atc-volume-label').textContent = status.volume ?? 70;
+                atcRenderStatus(status);
+            } catch (e) { /* ATC optional — ignore if unavailable */ }
+        }
+        function atcFillOutputs(outs, current) {
+            const sel = document.getElementById('atc-output');
+            sel.innerHTML = outs.map(o =>
+                `<option value="${o.id}">${o.name} [${o.type}]</option>`).join('');
+            if (current) sel.value = current;
+        }
+        function atcFillStations(current) {
+            const sel = document.getElementById('atc-station');
+            // Nearby (distance-ordered, dead feeds hidden) first, then all.
+            const nearbyOpts = _atcNearby.flatMap(ap => ap.feeds.map(f =>
+                `<option value="${f.code}">${ap.icao} ${f.label} · ${ap.dist_mi}mi — ${ap.name}</option>`));
+            const nearbyCodes = new Set(_atcNearby.flatMap(ap => ap.feeds.map(f => f.code)));
+            const allOpts = _atcStations.filter(s => !nearbyCodes.has(s.code)).map(s =>
+                `<option value="${s.code}">${s.airport} ${s.type} — ${s.name}</option>`);
+            sel.innerHTML =
+                (nearbyOpts.length ? `<optgroup label="Nearby">${nearbyOpts.join('')}</optgroup>` : '') +
+                `<optgroup label="All stations">${allOpts.join('')}</optgroup>`;
+            if (current) sel.value = current;
+        }
+        function atcRenderStatus(status) {
+            const live = document.getElementById('atc-live-status');
+            const btn = document.getElementById('atc-play');
+            btn.textContent = status.playing ? '⏸ Stop' : '▶ Start';
+            const parts = [];
+            if (status.playing) parts.push('LIVE');
+            if (status.station) parts.push(status.station.toUpperCase());
+            if (status.in_quiet_hours) parts.push(status.playing
+                ? '(quiet hours — overridden)'
+                : '(quiet hours — Start overrides)');
+            live.textContent = parts.join(' · ');
+            // Station dropdown only relevant in manual mode.
+            document.getElementById('atc-station-field').style.display =
+                (status.mode === 'manual') ? '' : 'none';
+        }
+        async function atcPost(url, body) {
+            try {
+                const res = await fetch(url, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body || {}),
+                });
+                const status = await res.json();
+                if (status && status.mode !== undefined) atcRenderStatus(status);
+                return status;
+            } catch (e) { return null; }
+        }
+        async function atcPairAirplay() {
+            // One-time pairing for AirPlay devices that ask for a code:
+            // begin -> the DEVICE shows a PIN -> type it here -> stored.
+            // AirPlay-2 receivers (Mac, HomePod) require TWO protocols paired,
+            // each with its OWN code, so loop while the server says {more:true}.
+            const sel = document.getElementById('atc-output');
+            const out = sel.value;
+            if (!out.startsWith('airplay:')) {
+                alert('Select an AirPlay device in the Output dropdown first.');
+                return;
+            }
+            let r = await atcPost('/api/atc/airplay/pair', {output: out});
+            // Slow receivers (Apple TV) outlast begin's server-side wait and
+            // come back as "starting" — poll until the code is on screen.
+            for (let i = 0; i < 30 && r && r.stage === 'starting'; i++) {
+                await new Promise(res => setTimeout(res, 1000));
+                r = await atcPost('/api/atc/airplay/pair', {status: true});
+            }
+            while (r && r.stage === 'awaiting_pin') {
+                const which = r.protocol ? ' (' + r.protocol + ')' : '';
+                const pin = prompt('Enter the code shown on the AirPlay device' + which + ':');
+                if (!pin) { atcPost('/api/atc/airplay/pair', {cancel: true}); return; }
+                r = await atcPost('/api/atc/airplay/pair', {pin});
+            }
+            if (r && r.stage === 'paired') {
+                // Restart the stream now that it's authorized: the backend
+                // keeps playing:true through an auth-stop, so tick() alone
+                // never respawns it — without this, "Paired" meant silence
+                // until the user found the play button.
+                await atcPost('/api/atc/start');
+                alert('Paired — credentials stored.');
+            } else {
+                alert('Pairing failed: ' + (r && r.error || 'unknown'));
+            }
+        }
+        async function atcRescanOutputs() {
+            try {
+                const outs = (await (await fetch('/api/atc/outputs?rescan=1')).json()).outputs || [];
+                const cur = document.getElementById('atc-output').value;
+                atcFillOutputs(outs, cur);
+            } catch (e) {}
+        }
+        async function atcPlayPause() {
+            const status = await fetch('/api/atc/status').then(r => r.json()).catch(() => ({}));
+            await atcPost(status.playing ? '/api/atc/stop' : '/api/atc/start');
+        }
+        function atcWire() {
+            document.getElementById('atc-mode').addEventListener('change', e =>
+                atcPost('/api/atc/mode', {mode: e.target.value}));
+            document.getElementById('atc-output').addEventListener('change', e =>
+                atcPost('/api/atc/select-output', {output: e.target.value}));
+            document.getElementById('atc-station').addEventListener('change', e =>
+                atcPost('/api/atc/station', {station: e.target.value}));
+            const vol = document.getElementById('atc-volume');
+            vol.addEventListener('input', e =>
+                document.getElementById('atc-volume-label').textContent = e.target.value);
+            vol.addEventListener('change', e =>
+                atcPost('/api/atc/volume', {volume: parseInt(e.target.value, 10)}));
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadConfig();
+            loadSystem();
+            wifiLoadStatus();
+            atcLoad();
+            atcWire();
+
+            // Attach dirty listeners to all config inputs
+            for (const key of CONFIG_FIELDS) {
+                const el = document.getElementById('cfg-' + key);
+                if (!el) continue;
+                el.addEventListener('input', markDirty);
+                el.addEventListener('change', markDirty);
+            }
+        });
+    </script>
+</body>
+</html>
