@@ -966,6 +966,34 @@
             const status = await fetch('/api/atc/status').then(r => r.json()).catch(() => ({}));
             await atcPost(status.playing ? '/api/atc/stop' : '/api/atc/start');
         }
+        // Poll ATC status so external changes reflect here instead of going
+        // stale: the Matter/HomeKit switch (atc-on.sh/atc-off.sh -> start/stop),
+        // the mirror's play button, auto-tune re-tuning, and quiet hours all
+        // move state without this page knowing. Mirrors what display.html's
+        // 1s poll already does for the mirror. A control the user is actively
+        // editing (focused) is never stomped.
+        function _atcReflectSelect(id, val) {
+            const sel = document.getElementById(id);
+            if (!sel || val == null || document.activeElement === sel) return;
+            if (sel.value === val) return;
+            if ([...sel.options].some(o => o.value === val)) sel.value = val;
+        }
+        async function atcPollStatus() {
+            let status;
+            try { status = await fetch('/api/atc/status').then(r => r.json()); }
+            catch (e) { return; }
+            if (!status || status.mode === undefined) return;
+            atcRenderStatus(status);                       // Start/Stop btn + LIVE + station-field
+            _atcReflectSelect('atc-mode', status.mode || 'off');
+            _atcReflectSelect('atc-output', status.output);
+            _atcReflectSelect('atc-station', status.station);
+            const vol = document.getElementById('atc-volume');
+            if (vol && document.activeElement !== vol
+                    && status.volume != null && +vol.value !== status.volume) {
+                vol.value = status.volume;
+                document.getElementById('atc-volume-label').textContent = status.volume;
+            }
+        }
         function atcWire() {
             document.getElementById('atc-mode').addEventListener('change', e =>
                 atcPost('/api/atc/mode', {mode: e.target.value}));
@@ -986,6 +1014,7 @@
             wifiLoadStatus();
             atcLoad();
             atcWire();
+            setInterval(atcPollStatus, 3000);  // keep ATC state live (Matter switch, mirror, auto-tune)
 
             // Attach dirty listeners to all config inputs
             for (const key of CONFIG_FIELDS) {
