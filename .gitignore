@@ -1,0 +1,52 @@
+# Environment files containing secrets
+.env
+.env.local
+.env.production
+
+# VS
+*.code-workspace/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# FR24 cache
+.fr24/
+
+# Runtime-downloaded databases
+rpi-rgb-led-matrix/
+its-a-plane-python/.cache/
+its-a-plane-python/airports.json
+its-a-plane-python/cities.json
+its-a-plane-python/airlines.json
+its-a-plane-python/nationalparks.json
+its-a-plane-python/config/
+
+to-integrate/
+
+# Device runtime data (never commit)
+its-a-plane-python/tracked_flight.json
+its-a-plane-python/close.txt
+its-a-plane-python/farthest.txt

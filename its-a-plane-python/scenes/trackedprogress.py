@@ -1,0 +1,81 @@
+from utilities.animator import Animator
+from setup import colours, screen
+
+LINE2_Y = 23
+
+FLOWN_COLOUR     = colours.LIMEGREEN
+REMAINING_COLOUR = colours.LIGHT_RED
+PLANE_COLOUR     = colours.WHITE
+
+
+def _calc_progress(data):
+    dist_remaining = data.get("dist_remaining")
+    total_distance = data.get("total_distance")
+    if dist_remaining is None or not total_distance or total_distance <= 0:
+        return 0.0
+    dist_flown = total_distance - dist_remaining
+    return max(0.0, min(1.0, dist_flown / total_distance))
+
+
+def _draw_plane(canvas, x, y, is_live=True):
+    c = PLANE_COLOUR if is_live else colours.LIGHT_RED
+    for px in range(x, x + 4):
+        canvas.SetPixel(px, y, c.red, c.green, c.blue)
+    canvas.SetPixel(x + 2, y - 1, c.red, c.green, c.blue)
+    canvas.SetPixel(x + 2, y + 1, c.red, c.green, c.blue)
+
+
+PLANE_WIDTH = 4
+
+
+class TrackedProgressScene(object):
+    def __init__(self):
+        super().__init__()
+        self._progress_state = None  # (plane_x, is_live); None = needs draw
+
+    @Animator.KeyFrame.add(0)
+    def reset_tracked_progress(self):
+        self.draw_square(0, LINE2_Y - 3, screen.WIDTH, LINE2_Y + 1, colours.BLACK)
+        self._progress_state = None
+
+    @Animator.KeyFrame.add(1)
+    def tracked_progress(self, count):
+        if getattr(self, '_iss_active', False):
+            return
+        if len(self._data) > 0:
+            return
+
+        tracked = self.overhead.tracked_data
+        if not tracked:
+            # next tracked session must repaint even if progress is equal
+            self._progress_state = None
+            return
+
+        progress = _calc_progress(tracked)
+        width  = screen.WIDTH
+        mid_y  = LINE2_Y - 1
+        usable = width - PLANE_WIDTH
+        plane_x = max(0, min(usable, int(progress * usable)))
+        is_live = tracked.get("is_live", True)
+
+        # The canvas is live — clearing + redrawing the identical bar at
+        # 10fps was constant flicker while the plane moves ~1px/min.
+        # Repaint only when the bar's content actually changes.
+        state = (plane_x, is_live)
+        if state == self._progress_state:
+            return
+        self._progress_state = state
+
+        self.draw_square(0, LINE2_Y - 3, width, LINE2_Y + 1, colours.BLACK)
+
+        for x in range(plane_x):
+            if (x // 2) % 2 == 0:
+                self.canvas.SetPixel(x, mid_y,
+                    FLOWN_COLOUR.red, FLOWN_COLOUR.green, FLOWN_COLOUR.blue)
+
+        for x in range(plane_x + PLANE_WIDTH, width):
+            if (x // 2) % 2 == 0:
+                self.canvas.SetPixel(x, mid_y,
+                    REMAINING_COLOUR.red, REMAINING_COLOUR.green, REMAINING_COLOUR.blue)
+
+        _draw_plane(self.canvas, plane_x, mid_y, is_live=is_live)
