@@ -293,7 +293,10 @@ def get_uv_index():
 # ─── Forecast ────────────────────────────────────────────────────────────────
 _cached_forecast = None
 _cached_forecast_ts = 0.0
-_FORECAST_CACHE_TTL = 3600  # 1 hour
+_FORECAST_CACHE_TTL = 900  # 15 min — refreshes the hourly UV curve 4x/hr so
+# get_current_uv() tracks Tomorrow.io's own model updates sooner instead of
+# leaning on interpolation between stale hourly points. Well within the free
+# tier even with two devices sharing one API key (240 calls/day of 500 limit).
 
 # Load persistent forecast cache on startup
 _startup_fc, _startup_fc_ts = _load_file_cache(_FORECAST_CACHE_FILE, units=TEMPERATURE_UNITS)
