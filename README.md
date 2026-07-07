@@ -97,7 +97,11 @@ set of local-conditions feeds (each optional, configured by station/coords):
 - **Nearest city / landmark** — reverse-geocoded place name for a flight's
   position (offline cities5000 database + landmark lookup).
 - **NWS alerts** — severity-coloured weather-alert rotation (see
-  `utilities/nws_alerts.py`), and a **UV index** chip beside the temperature.
+  `utilities/nws_alerts.py`).
+- **UV index** — a chip beside the temperature, EPA/WHO-coloured. Interpolated
+  from Tomorrow.io's hourly forecast curve to the current moment (refreshed
+  every 15 min) rather than a single realtime snapshot, which is rate-limited
+  and otherwise lags a fast-changing sky.
 
 ### Odds and ends
 Heliport/helicopter detection, custom HELI/GA/ISS logos, moon-phase date
