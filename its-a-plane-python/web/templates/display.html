@@ -84,6 +84,7 @@ canvas {
 }
 .atc-select:hover { border-color: #ffa500; }
 .atc-live { color: #4a4; }
+.atc-vol { width: 72px; accent-color: #ffa500; cursor: pointer; vertical-align: middle; }
 .atc-icon {
     background: #1a1a15; border: 1px solid #444; color: #806000;
     padding: 3px 6px; cursor: pointer; border-radius: 3px; line-height: 0;
@@ -158,6 +159,7 @@ canvas {
     <button class="atc-icon" id="atc-airplay" title="AirPlay">
         <svg viewBox="0 0 24 24"><path d="M6 22h12l-6-7-6 7zM21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4v-2H3V5h18v12h-4v2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
     </button>
+    <input type="range" class="atc-vol" id="atc-vol" min="0" max="100" value="70" title="Volume">
     <span class="atc-live" id="atc-live"></span>
     <div class="atc-pop" id="atc-pop"></div>
     <audio id="atc-audio" preload="none"></audio>
@@ -1048,6 +1050,8 @@ const ATC = {
     meta: document.getElementById('atc-meta'),
     select: document.getElementById('atc-select'),
     live: document.getElementById('atc-live'),
+    vol: document.getElementById('atc-vol'),
+    volDragging: false,
     resume: document.getElementById('atc-resume'),
     wantOn: localStorage.getItem('atc_want_on') === '1',
     curUrl: '',
@@ -1269,6 +1273,12 @@ function atcApply(atc) {
     ATC.quiet = !!atc.in_quiet_hours;
     ATC.output = atc.output || 'browser';
     ATC.label = atc.station_label || '';
+    // Reflect server volume on the slider (unless the user is mid-drag) and
+    // apply it to this tab's <audio> for browser playback.
+    if (!ATC.volDragging && atc.volume != null) {
+        ATC.vol.value = atc.volume;
+        ATC.audioEl.volume = Math.max(0, Math.min(1, atc.volume / 100));
+    }
     if (ATC.playing) atcSetMediaSession();   // reflect a mid-listen re-tune
     atcRenderOutputs();
     // The select shows the target; meta shows what auto actually tuned.
@@ -1324,6 +1334,7 @@ function atcStart(force) {
     if (!ATC.curUrl) return;
     if (force) { ATC.audioEl.pause(); ATC.audioEl.removeAttribute('src'); }
     if (ATC.audioEl.src !== ATC.curUrl) ATC.audioEl.src = ATC.curUrl;
+    ATC.audioEl.volume = Math.max(0, Math.min(1, (parseInt(ATC.vol.value, 10) || 70) / 100));
     const p = ATC.audioEl.play();
     if (p && p.then) {
         p.then(() => {
@@ -1417,6 +1428,24 @@ ATC.toggle.onclick = () => {
 };
 // Any click on the resume overlay counts as the gesture to restart audio.
 ATC.resume.onclick = () => { ATC.errCount = 0; atcStart(false); };
+
+// Volume slider: sets this tab's <audio> volume live and pushes the value to
+// the server (which drives the Pi USB/mpv output and is echoed to every
+// mirror). Debounced so a drag doesn't spam /api/atc/volume; volDragging
+// keeps the poll from yanking the knob back mid-drag.
+let _atcVolTimer = null;
+ATC.vol.addEventListener('input', () => {
+    ATC.volDragging = true;
+    const v = parseInt(ATC.vol.value, 10) || 0;
+    ATC.audioEl.volume = Math.max(0, Math.min(1, v / 100));
+    clearTimeout(_atcVolTimer);
+    _atcVolTimer = setTimeout(() => atcPost('/api/atc/volume', {volume: v}), 250);
+});
+ATC.vol.addEventListener('change', () => {
+    clearTimeout(_atcVolTimer);
+    atcPost('/api/atc/volume', {volume: parseInt(ATC.vol.value, 10) || 0});
+    setTimeout(() => { ATC.volDragging = false; }, 600);  // let the poll resume
+});
 
 async function poll() {
     try {
