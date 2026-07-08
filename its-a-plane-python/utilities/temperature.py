@@ -14,6 +14,21 @@ from requests import Session
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 from urllib3.util.retry import Retry
+import gc as _gc
+import ctypes as _ctypes
+
+# Force glibc to return freed arenas to the OS after each API call. Without
+# this, CPython's pymalloc holds freed-but-not-empty arenas indefinitely —
+# on a 512MB Pi 3A+, repeated HTTP+JSON parse cycles (every 15 min) cause
+# RSS to ratchet up via fragmentation even without a true leak.
+try:
+    _libc = _ctypes.CDLL("libc.so.6")
+    def _trim_memory():
+        _gc.collect()
+        _libc.malloc_trim(0)
+except (OSError, AttributeError):
+    def _trim_memory():
+        _gc.collect()
 
 try:
     from utilities.api_usage import log_call as _log_api
@@ -266,6 +281,7 @@ def grab_temperature_and_humidity():
         _cached_temp = (temperature, humidity, uv_index)
         _cached_temp_ts = time.time()
         _save_file_cache(_TEMP_CACHE_FILE, [temperature, humidity, uv_index], units=TEMPERATURE_UNITS)
+        _trim_memory()
         return temperature, humidity
 
     except (RequestException, ValueError) as e:
@@ -296,7 +312,10 @@ _cached_forecast_ts = 0.0
 _FORECAST_CACHE_TTL = 900  # 15 min — refreshes the hourly UV curve 4x/hr so
 # get_current_uv() tracks Tomorrow.io's own model updates sooner instead of
 # leaning on interpolation between stale hourly points. Well within the free
-# tier even with two devices sharing one API key (240 calls/day of 500 limit).
+# tier (worst case, two devices sharing one key: 240 calls/day of 500 limit).
+# NOTE (2026-07-07): a Pi 3 A+ (512MB) showed swap pressure/display
+# freezing the same day this shipped. Code review found no accumulation bug
+# in this code path — pending a full memory investigation on Friday.
 
 # Load persistent forecast cache on startup
 _startup_fc, _startup_fc_ts = _load_file_cache(_FORECAST_CACHE_FILE, units=TEMPERATURE_UNITS)
@@ -488,6 +507,7 @@ def grab_forecast(tag="unknown"):
         _cached_forecast = intervals
         _cached_forecast_ts = time.time()
         _save_file_cache(_FORECAST_CACHE_FILE, intervals, units=TEMPERATURE_UNITS)
+        _trim_memory()
         return intervals
 
     except RequestException as e:
