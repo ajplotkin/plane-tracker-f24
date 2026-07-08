@@ -479,6 +479,27 @@ Make sure you select the correct timezone since that is what is displayed on the
 ### 2. Connect via SSH
 I use **[MobaXterm](https://mobaxterm.mobatek.net/)** on Windows to SSH into the Pi since it allows you to see the folder structure. Can just open the files from there and edit them instead of through the cmd prompt. After [SSH-ing into the Pi](https://www.fromdev.com/2025/04/how-to-ssh-into-raspberry-pi-a-step-by-step-guide.html), proceed with the following steps.
 
+### 2b. Memory fix for Pi 3A+ and other 512 MB boards (do this before anything else)
+
+Raspberry Pi OS ships with `dtoverlay=vc4-kms-v3d` enabled — a GPU video driver
+that reserves **256 MB for video compositing**, leaving only ~190 MB for everything
+else on a 512 MB Pi. A headless LED matrix tracker doesn't use the GPU. Two edits
+fix this and free ~290 MB:
+
+```bash
+# 1. /boot/firmware/config.txt — comment out the vc4 overlay, reduce GPU memory:
+sudo sed -i 's/^dtoverlay=vc4-kms-v3d/# dtoverlay=vc4-kms-v3d/' /boot/firmware/config.txt
+echo -e "gpu_mem=16" | sudo tee -a /boot/firmware/config.txt
+
+# 2. /boot/firmware/cmdline.txt — append cma=16M to the SINGLE existing line:
+sudo sed -i 's/$/ cma=16M/' /boot/firmware/cmdline.txt
+
+sudo reboot
+```
+
+After reboot, verify: `grep CmaTotal /proc/meminfo` should show ~16384 kB (not 262144).
+HDMI console/terminal output still works — only the GPU-accelerated desktop is disabled.
+
 ### 3. Install the Adafruit Bonnet
 [Install the bonnet](https://learn.adafruit.com/adafruit-rgb-matrix-bonnet-for-raspberry-pi/) by following the instructions provided by Adafruit.
 
