@@ -76,6 +76,7 @@ def _apply():
     global NWS_ALERTS_ENABLED, ISS_ALERTS_ENABLED, BLOCKED_CALLSIGNS, STATS_LOG_DAYS
     global ATC_ENABLED, ATC_MODE, ATC_STATION, ATC_VOLUME, ATC_OUTPUT
     global ATC_AUTO_RESUME, ATC_QUIET_HOURS, ATC_CUSTOM_FEEDS
+    global HOURLY_CHIME_ENABLED, HOURLY_CHIME_VOLUME
 
     # --- API Keys ---
     FR24_API_KEY = _get("FR24_API_KEY")
@@ -154,6 +155,10 @@ def _apply():
     ATC_QUIET_HOURS = _get("ATC_QUIET_HOURS", "")
     # Extra stations: "ICAO/kind/mount[/lat/lon]" comma list merged over the seed.
     ATC_CUSTOM_FEEDS = _get("ATC_CUSTOM_FEEDS", "")
+
+    # --- Hourly chime ---
+    HOURLY_CHIME_ENABLED = _bool(_get("HOURLY_CHIME_ENABLED", "False"))
+    HOURLY_CHIME_VOLUME = int(_get("HOURLY_CHIME_VOLUME", "50"))   # mpv 0-100
 
 
 def reload():

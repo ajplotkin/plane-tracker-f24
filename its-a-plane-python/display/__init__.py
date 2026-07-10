@@ -4,6 +4,7 @@ from datetime import datetime
 from setup import frames, screen
 from utilities.animator import Animator
 from utilities.overhead import Overhead
+from utilities import hourly_chime
 
 from scenes.temperature import TemperatureScene
 from scenes.flightdetails import FlightDetailsScene
@@ -49,6 +50,8 @@ try:
         NIGHT_END,
         NIGHT_BRIGHTNESS,
         LED_RGB_SEQUENCE,
+        HOURLY_CHIME_ENABLED,
+        HOURLY_CHIME_VOLUME,
     )
     NIGHT_START = datetime.strptime(NIGHT_START, "%H:%M")
     NIGHT_END = datetime.strptime(NIGHT_END, "%H:%M")
@@ -59,6 +62,8 @@ except (ImportError, NameError):
     HAT_PWM_ENABLED = True
     NIGHT_BRIGHTNESS = False
     LED_RGB_SEQUENCE = "RGB"
+    HOURLY_CHIME_ENABLED = False
+    HOURLY_CHIME_VOLUME = 50
 
 
 def adjust_brightness(matrix):
@@ -134,6 +139,10 @@ class Display(
         # Single Overhead instance handles both zone and tracked flight
         self.overhead = Overhead()
         self.overhead.grab_data()
+
+        # Hour bucket already "seen" — set to now so a restart never fires an
+        # immediate/duplicate chime for the hour that's already in progress.
+        self._last_chime_hour = datetime.now().strftime("%Y-%m-%d %H")
 
         super().__init__()
 
@@ -236,6 +245,15 @@ class Display(
     def sync(self, count):
         _ = self.matrix.SwapOnVSync(self.canvas)
         adjust_brightness(self.matrix)
+
+    @Animator.KeyFrame.add(frames.PER_SECOND * 20)
+    def check_hourly_chime(self, count):
+        if not HOURLY_CHIME_ENABLED:
+            return
+        hour_key = datetime.now().strftime("%Y-%m-%d %H")
+        if hour_key != self._last_chime_hour:
+            self._last_chime_hour = hour_key
+            hourly_chime.play(HOURLY_CHIME_VOLUME)
 
     @Animator.KeyFrame.add(frames.PER_SECOND * 30)
     def grab_new_data(self, count):
