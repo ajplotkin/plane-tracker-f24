@@ -24,8 +24,10 @@ descriptors) over long-running 24/7 operation.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
+import ssl
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -97,6 +99,33 @@ try:
     import hpack  # noqa: E402, F401
 except ImportError:
     pass  # Non-fatal — only needed if using HTTP/2
+
+import httpx  # noqa: E402  (already an fr24 dependency)
+
+# ONE TLS context for the whole process. Each `_run_with_client` call builds a
+# fresh httpx AsyncClient; without an injected context, every client re-loads
+# and re-parses the full CA bundle into a new SSLContext. At ~40 FR24 calls/hr
+# (90s feed polls + per-flight details) that churn was the display process's
+# main slow leak (~0.35 MB/h RSS ratchet) — CPython on Linux never fully
+# returns SSLContext allocations to the OS. An SSLContext is thread-safe and
+# event-loop-agnostic, so one shared instance is safe even though each call
+# still gets its own fresh loop + client. Built at import time, which (like
+# the h2 force-import above) also runs before rgbmatrix drops privileges.
+try:
+    _SSL_CONTEXT: ssl.SSLContext | None = ssl.create_default_context()
+except Exception:  # cert store unavailable — fall back to per-client default
+    _SSL_CONTEXT = None
+
+# Bare malloc_trim (NO gc.collect — a full collection stalls the GIL that the
+# LED render thread shares; refcounting has already freed the per-call client
+# garbage by the time a cycle ends, trim just hands the pages back to the OS).
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim() -> None:
+        _libc.malloc_trim(0)
+except (OSError, AttributeError):
+    def _malloc_trim() -> None:
+        pass
 
 
 @dataclass
@@ -195,7 +224,15 @@ class FR24Client:
         loop = asyncio.new_event_loop()
         try:
             async def _wrapper():
-                fr24 = FR24()
+                # Inject the shared process-wide SSLContext so this fresh
+                # client skips the CA-bundle load (see _SSL_CONTEXT above).
+                # The client itself stays per-call: httpx clients are bound
+                # to the event loop they first run on, contexts are not.
+                if _SSL_CONTEXT is not None:
+                    fr24 = FR24(client=httpx.AsyncClient(http2=True,
+                                                         verify=_SSL_CONTEXT))
+                else:
+                    fr24 = FR24()
                 async with fr24:
                     try:
                         await fr24.login("from_env")
@@ -266,6 +303,14 @@ class FR24Client:
         # Cache the result and record the poll
         self._cache.set_cached_flights(cache_key, result)
         self._cache.record_feed_poll(cache_key)
+
+        # Evict expired detail-cache entries. TTLCache only deletes an expired
+        # entry when THAT key is re-read — departed flights never are, so
+        # without this sweep every flight ever seen leaves a permanent ~3-6KB
+        # dict (a second slow leak: ~0.5-1.5 MB/day). Cheap: one dict scan.
+        self._cache.cleanup()
+        # Return freed per-call client/proto pages to the OS (see _malloc_trim).
+        _malloc_trim()
 
         return result
 
