@@ -57,6 +57,23 @@ def _bool(val) -> bool:
     return str(val).strip().lower() in ("true", "1", "yes", "on")
 
 
+def _int(name: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
+    """Coerce a config value to int, tolerating garbage. A bad value (e.g. a
+    non-numeric string written straight to config.json via the unauthenticated
+    /api/config POST, or a hand-edit typo) must NOT raise here — this runs at
+    module import, so an uncaught ValueError would crash the display at startup.
+    Falls back to `default` and optionally clamps to [lo, hi]."""
+    try:
+        v = int(float(_get(name, str(default))))
+    except (TypeError, ValueError):
+        v = default
+    if lo is not None:
+        v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
+
+
 def config_source():
     """Return 'json' if JSON overlay is active, else 'env'."""
     return "json" if _json_config else "env"
@@ -102,17 +119,17 @@ def _apply():
     # --- Weather ---
     TEMPERATURE_LOCATION = _get("TEMPERATURE_LOCATION")
     TEMPERATURE_UNITS = _get("TEMPERATURE_UNITS", "metric")
-    FORECAST_DAYS = int(_get("FORECAST_DAYS", "3"))
+    FORECAST_DAYS = _int("FORECAST_DAYS", 3, 1, 7)
 
     # --- Display & units ---
     DISTANCE_UNITS = _get("DISTANCE_UNITS", "metric")
     CLOCK_FORMAT = _get("CLOCK_FORMAT", "24hr")
-    BRIGHTNESS = int(_get("BRIGHTNESS", "100"))
-    BRIGHTNESS_NIGHT = int(_get("BRIGHTNESS_NIGHT", "50"))
+    BRIGHTNESS = _int("BRIGHTNESS", 100, 0, 100)
+    BRIGHTNESS_NIGHT = _int("BRIGHTNESS_NIGHT", 50, 0, 100)
     NIGHT_BRIGHTNESS = _bool(_get("NIGHT_BRIGHTNESS", "False"))
     NIGHT_START = _get("NIGHT_START", "22:00")
     NIGHT_END = _get("NIGHT_END", "06:00")
-    GPIO_SLOWDOWN = int(_get("GPIO_SLOWDOWN", "2"))
+    GPIO_SLOWDOWN = _int("GPIO_SLOWDOWN", 2, 0, 5)
     LED_RGB_SEQUENCE = _get("LED_RGB_SEQUENCE", "RGB")
     TIDE_STATION = _get("TIDE_STATION", "")
     WATER_TEMP_STATION = _get("WATER_TEMP_STATION", "")
@@ -122,7 +139,7 @@ def _apply():
     HAT_PWM_ENABLED = _bool(_get("HAT_PWM_ENABLED", "True"))
 
     # --- Flight filtering ---
-    MIN_ALTITUDE = int(_get("MIN_ALTITUDE", "0"))
+    MIN_ALTITUDE = _int("MIN_ALTITUDE", 0, 0)
     JOURNEY_CODE_SELECTED = _get("JOURNEY_CODE_SELECTED")
     _raw_filler = _get("JOURNEY_BLANK_FILLER", "").strip()
     JOURNEY_BLANK_FILLER = f" {_raw_filler} " if _raw_filler else " ? "
@@ -130,8 +147,8 @@ def _apply():
 
     # --- Logging & notifications ---
     EMAIL = _get("EMAIL")
-    MAX_FARTHEST = int(_get("MAX_FARTHEST", "3"))
-    MAX_CLOSEST = int(_get("MAX_CLOSEST", "3"))
+    MAX_FARTHEST = _int("MAX_FARTHEST", 3, 1)
+    MAX_CLOSEST = _int("MAX_CLOSEST", 3, 1)
 
     # --- Alert toggles ---
     NWS_ALERTS_ENABLED = _bool(_get("NWS_ALERTS_ENABLED", "True"))
@@ -142,13 +159,13 @@ def _apply():
     BLOCKED_CALLSIGNS = [c.strip().upper() for c in _raw_blocked.split(",") if c.strip()]
 
     # --- Stats retention ---
-    STATS_LOG_DAYS = int(_get("STATS_LOG_DAYS", "90"))
+    STATS_LOG_DAYS = _int("STATS_LOG_DAYS", 90, 0)
 
     # --- ATC audio (O1) ---
     ATC_ENABLED = _bool(_get("ATC_ENABLED", "False"))
     ATC_MODE = _get("ATC_MODE", "off")                 # off | auto | manual
     ATC_STATION = _get("ATC_STATION", "")              # LiveATC feed code (manual)
-    ATC_VOLUME = int(_get("ATC_VOLUME", "70"))
+    ATC_VOLUME = _int("ATC_VOLUME", 70, 0, 100)
     ATC_OUTPUT = _get("ATC_OUTPUT", "browser")         # unified output id
     ATC_AUTO_RESUME = _bool(_get("ATC_AUTO_RESUME", "True"))
     # Quiet hours: "HH:MM-HH:MM"; empty => defaults to the night window.
@@ -158,7 +175,7 @@ def _apply():
 
     # --- Hourly chime ---
     HOURLY_CHIME_ENABLED = _bool(_get("HOURLY_CHIME_ENABLED", "False"))
-    HOURLY_CHIME_VOLUME = int(_get("HOURLY_CHIME_VOLUME", "50"))   # mpv 0-100
+    HOURLY_CHIME_VOLUME = _int("HOURLY_CHIME_VOLUME", 50, 0, 100)   # mpv 0-100
 
 
 def reload():
