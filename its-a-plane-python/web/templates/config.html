@@ -402,6 +402,23 @@
         </div>
     </div>
 
+    <!-- Hourly Chime -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">HOURLY CHIME</div>
+        <div class="section-body">
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-HOURLY_CHIME_ENABLED" />
+                <label for="cfg-HOURLY_CHIME_ENABLED">HOURLY_CHIME_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Cabin "ding-dong" on the hour (local speaker; save + restart)</span>
+            </div>
+            <div class="field">
+                <label>HOURLY_CHIME_VOLUME</label>
+                <input type="number" id="cfg-HOURLY_CHIME_VOLUME" min="0" max="100" placeholder="50" />
+                <span class="hint">Loudness 0–100</span>
+            </div>
+        </div>
+    </div>
+
     <!-- ATC Audio -->
     <div class="section">
         <div class="section-header" onclick="toggleSection(this)">ATC AUDIO</div>
@@ -575,13 +592,14 @@
             'NIGHT_BRIGHTNESS', 'NIGHT_START', 'NIGHT_END', 'HAT_PWM_ENABLED',
             'MIN_ALTITUDE', 'JOURNEY_BLANK_FILLER', 'FORECAST_DAYS', 'BLOCKED_CALLSIGNS',
             'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED',
+            'HOURLY_CHIME_ENABLED', 'HOURLY_CHIME_VOLUME',
             'MAX_CLOSEST', 'MAX_FARTHEST', 'STATS_LOG_DAYS',
             'FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY',
             'EMAIL',
             'ATC_ENABLED', 'ATC_QUIET_HOURS', 'ATC_CUSTOM_FEEDS', 'ATC_AUTO_RESUME',
         ];
 
-        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME'];
+        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME'];
         const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
 
         function toggleSection(header) {

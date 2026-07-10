@@ -539,6 +539,7 @@ def api_config_get():
         "NIGHT_BRIGHTNESS", "NIGHT_START", "NIGHT_END", "HAT_PWM_ENABLED",
         "MIN_ALTITUDE", "JOURNEY_BLANK_FILLER", "FORECAST_DAYS", "BLOCKED_CALLSIGNS",
         "NWS_ALERTS_ENABLED", "ISS_ALERTS_ENABLED",
+        "HOURLY_CHIME_ENABLED", "HOURLY_CHIME_VOLUME",
         "MAX_CLOSEST", "MAX_FARTHEST", "STATS_LOG_DAYS",
         "FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY", "NPS_API_KEY", "OWM_API_KEY",
         "EMAIL",
@@ -547,7 +548,7 @@ def api_config_get():
     ]:
         # Return resolved booleans for checkbox fields
         if key in {"NIGHT_BRIGHTNESS", "HAT_PWM_ENABLED", "NWS_ALERTS_ENABLED", "ISS_ALERTS_ENABLED",
-                   "ATC_ENABLED", "ATC_AUTO_RESUME"}:
+                   "HOURLY_CHIME_ENABLED", "ATC_ENABLED", "ATC_AUTO_RESUME"}:
             result[key] = getattr(cfg, key, False)
             continue
         val = cfg._get(key)
@@ -589,6 +590,7 @@ _VALID_CONFIG_KEYS = {
     "EMAIL",
     "ATC_ENABLED", "ATC_MODE", "ATC_STATION", "ATC_VOLUME", "ATC_OUTPUT",
     "ATC_AUTO_RESUME", "ATC_QUIET_HOURS", "ATC_CUSTOM_FEEDS",
+    "HOURLY_CHIME_ENABLED", "HOURLY_CHIME_VOLUME",
 }
 
 
