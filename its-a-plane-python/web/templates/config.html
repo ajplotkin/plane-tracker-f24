@@ -416,6 +416,16 @@
                 <input type="number" id="cfg-HOURLY_CHIME_VOLUME" min="0" max="100" placeholder="50" />
                 <span class="hint">Loudness 0–100</span>
             </div>
+            <div class="field">
+                <label>HOURLY_CHIME_QUIET_START</label>
+                <input type="time" id="cfg-HOURLY_CHIME_QUIET_START" />
+                <span class="hint">Silence starts (blank = chime 24/7)</span>
+            </div>
+            <div class="field">
+                <label>HOURLY_CHIME_QUIET_END</label>
+                <input type="time" id="cfg-HOURLY_CHIME_QUIET_END" />
+                <span class="hint">Silence ends</span>
+            </div>
         </div>
     </div>
 
@@ -593,6 +603,7 @@
             'MIN_ALTITUDE', 'JOURNEY_BLANK_FILLER', 'FORECAST_DAYS', 'BLOCKED_CALLSIGNS',
             'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED',
             'HOURLY_CHIME_ENABLED', 'HOURLY_CHIME_VOLUME',
+            'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END',
             'MAX_CLOSEST', 'MAX_FARTHEST', 'STATS_LOG_DAYS',
             'FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY',
             'EMAIL',

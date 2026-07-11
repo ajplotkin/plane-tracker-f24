@@ -94,6 +94,7 @@ def _apply():
     global ATC_ENABLED, ATC_MODE, ATC_STATION, ATC_VOLUME, ATC_OUTPUT
     global ATC_AUTO_RESUME, ATC_QUIET_HOURS, ATC_CUSTOM_FEEDS
     global HOURLY_CHIME_ENABLED, HOURLY_CHIME_VOLUME
+    global HOURLY_CHIME_QUIET_START, HOURLY_CHIME_QUIET_END
 
     # --- API Keys ---
     FR24_API_KEY = _get("FR24_API_KEY")
@@ -176,6 +177,9 @@ def _apply():
     # --- Hourly chime ---
     HOURLY_CHIME_ENABLED = _bool(_get("HOURLY_CHIME_ENABLED", "False"))
     HOURLY_CHIME_VOLUME = _int("HOURLY_CHIME_VOLUME", 50, 0, 100)   # mpv 0-100
+    # Quiet-hours window (HH:MM). Blank or equal start/end => chime 24/7.
+    HOURLY_CHIME_QUIET_START = _get("HOURLY_CHIME_QUIET_START", "")
+    HOURLY_CHIME_QUIET_END = _get("HOURLY_CHIME_QUIET_END", "")
 
 
 def reload():
