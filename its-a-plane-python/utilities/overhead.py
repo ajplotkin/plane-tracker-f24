@@ -1122,12 +1122,21 @@ class Overhead:
                     self._tracked_miss_count = 0
 
                     if just_became_live:
-                        # Write tracked scroll epoch for display mirror sync
+                        # A new tracked flight just went airborne — clear the
+                        # PREVIOUS flight's route/stats scroll epochs so the
+                        # mirror uses a fresh client-side epoch for the first
+                        # cycle instead of the stale ts (which gave the wrong
+                        # scroll phase). The scenes rewrite them on the next
+                        # wrap. (The old tracked_scroll_epoch.json write here was
+                        # dead — nothing ever read that file.)
                         try:
-                            import json as _json, time as _time
                             _cache_dir = os.path.join(BASE_DIR, ".cache")
-                            with open(os.path.join(_cache_dir, "tracked_scroll_epoch.json"), "w") as _f:
-                                _json.dump({"ts": _time.time()}, _f)
+                            for _stale in ("tracked_route_epoch.json",
+                                           "tracked_stats_epoch.json"):
+                                try:
+                                    os.remove(os.path.join(_cache_dir, _stale))
+                                except OSError:
+                                    pass
                         except Exception:
                             pass
                         # First airborne detection — cache route data.

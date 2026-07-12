@@ -101,17 +101,21 @@ def _load_json(path, default):
         return default
 
 
-def _atomic_write(path, data):
+def _atomic_write(path, data, mode=0o666):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
-        os.replace(tmp, path)
+        # Set perms on the TEMP file before it's renamed into place, so the
+        # final path is never briefly world-readable — important for the
+        # pairing-secrets file (mode=0o600). Default 0o666 keeps the shared
+        # display/web data files writable by both processes.
         try:
-            os.chmod(path, 0o666)
+            os.chmod(tmp, mode)
         except OSError:
             pass
+        os.replace(tmp, path)
     except Exception:
         pass
 
@@ -912,7 +916,14 @@ class ATCAudioManager:
 
     def start(self):
         """Explicit start (HomeKit on.sh / UI play)."""
+        self._refresh_config()
         with self._lock:
+            # Refuse when the feature is disabled — otherwise start() picked a
+            # station (probing), set _playing, and spawned a backend that the
+            # next tick() immediately tore down, so a HomeKit ON while disabled
+            # flapped the tile true->false and burned a probe/spawn cycle.
+            if not self._enabled:
+                return self.status()
             if self._mode == "off":
                 # Restore the mode that was active before the last stop();
                 # fall back to manual-if-station-set, else auto.
@@ -1091,22 +1102,37 @@ class ATCAudioManager:
     @staticmethod
     def _detect_usb_alsa_device():
         """mpv --audio-device string for the first USB-audio card (the ATC
-        speaker), read from /proc/asound/cards — e.g.
-        'alsa/plughw:CARD=UACDemoV10,DEV=0'. Returns '' if there is no USB card
-        (mpv then falls back to its own default). plughw: lets ALSA convert
-        sample-rate/format for cheap USB DACs."""
+        speaker), read from /proc/asound/cards.
+
+        Prefers a shared software-mix PCM ('usbmix', a dmix defined in
+        /etc/asound.conf) when configured, so the ATC stream and the hourly
+        chime MIX instead of fighting over the exclusive hw device (the loser
+        got 'Device or resource busy' -> silence). Falls back to plughw for the
+        detected card when no dmix is set up. '' if there is no USB card (mpv
+        then uses its own default)."""
         import re as _re
         try:
             with open("/proc/asound/cards") as f:
                 text = f.read()
         except OSError:
             return ""
+        card = None
         # " 2 [UACDemoV10     ]: USB-Audio - USB Audio Device"
         for m in _re.finditer(r"^\s*\d+\s*\[([^\]]+)\]:\s*(.+)$", text, _re.M):
             name, desc = m.group(1).strip(), m.group(2)
             if "USB-Audio" in desc or "USB Audio" in desc:
-                return f"alsa/plughw:CARD={name},DEV=0"
-        return ""
+                card = name
+                break
+        if not card:
+            return ""
+        for cfg in ("/etc/asound.conf", os.path.expanduser("~/.asoundrc")):
+            try:
+                with open(cfg) as f:
+                    if "pcm.usbmix" in f.read():
+                        return "alsa/usbmix"
+            except OSError:
+                continue
+        return f"alsa/plughw:CARD={card},DEV=0"
 
     def _start_mpv_locked(self):
         url = self._stream_url(self._station)
@@ -1629,15 +1655,9 @@ class ATCAudioManager:
                 if state["stage"] == "paired" and state["creds"]:
                     stored = _load_json(_AIRPLAY_CREDS, {})
                     stored[ident] = state["creds"]
-                    _atomic_write(_AIRPLAY_CREDS, stored)
-                    try:
-                        # _atomic_write chmods 0o666 for the shared-data
-                        # pattern; this file holds pairing SECRETS — clamp
-                        # to owner-only (best-effort: EPERM if another user
-                        # owns a pre-existing file).
-                        os.chmod(_AIRPLAY_CREDS, 0o600)
-                    except OSError:
-                        pass
+                    # Owner-only from the moment the file appears (pairing
+                    # SECRETS) — no world-readable window.
+                    _atomic_write(_AIRPLAY_CREDS, stored, mode=0o600)
                     if self._airplay_needs_pairing == ident:
                         self._airplay_needs_pairing = ""
             except Exception as e:

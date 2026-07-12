@@ -164,6 +164,7 @@ class TrackedStatsScene(object):
         super().__init__()
         self._ts_pos = screen.WIDTH
         self._ts_len = 0
+        self._ts_last_number = None
 
     @Animator.KeyFrame.add(0)
     def reset_tracked_stats_scroll(self):
@@ -180,6 +181,14 @@ class TrackedStatsScene(object):
         tracked = self.overhead.tracked_data
         if not tracked:
             return
+
+        # New tracked flight: restart the scroll (reset_scene only fires on
+        # zone-flight changes, not tracked-flight changes).
+        _num = tracked.get("number") or tracked.get("callsign")
+        if _num != self._ts_last_number:
+            self._ts_pos = screen.WIDTH
+            self._ts_len = 0
+            self._ts_last_number = _num
 
         char_list = _build_stats(tracked)
 

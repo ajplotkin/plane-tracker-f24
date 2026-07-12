@@ -70,6 +70,7 @@ class TrackedRouteScene(object):
         self._tr_len = 0
         self._tr_logo = None
         self._tr_last_icao = None
+        self._tr_last_number = None
 
     @Animator.KeyFrame.add(0)
     def reset_tracked_route_scroll(self):
@@ -89,6 +90,14 @@ class TrackedRouteScene(object):
 
         airline_name = tracked.get("airline_name", "")
         number       = tracked.get("number", tracked.get("callsign", ""))
+        # New tracked flight: restart the scroll rather than inherit the
+        # previous flight's mid-scroll position/length. reset_scene() (which
+        # runs reset_tracked_route_scroll) only fires on zone-flight changes,
+        # not tracked-flight changes.
+        if number != self._tr_last_number:
+            self._tr_pos = screen.WIDTH
+            self._tr_len = 0
+            self._tr_last_number = number
         # Extract just the numeric part e.g. "UA1583" -> "1583"
         flight_num   = ''.join(ch for ch in number if ch.isnumeric())
         display_name = f"{airline_name} {flight_num}".strip() if airline_name else number
