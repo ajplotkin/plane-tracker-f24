@@ -193,9 +193,13 @@ class ATCAudioManager:
         # device must not be re-spawned on every 5s tick.
         self._backend_retry_ts = 0.0
 
-        # Output discovery cache.
-        self._outputs_cache = None
-        self._outputs_ts = 0.0
+        # Output discovery cache — SEED from the last persisted scan so the
+        # first output-popover after a restart doesn't block ~8s on a cold mDNS
+        # sweep. list_outputs() serves this immediately (even if stale) and
+        # refreshes in the background.
+        _oc = _load_json(_OUTPUT_CACHE, {})
+        self._outputs_cache = _oc.get("outputs") or None
+        self._outputs_ts = _oc.get("ts", 0.0)
 
         # Probe circuit breaker + runtime dead-feed memory (see _probe_feed).
         self._probe_cooldown_until = 0.0
@@ -664,8 +668,28 @@ class ATCAudioManager:
                 {"id": "browser", "name": "This browser", "type": "browser"},
                 {"id": "usb", "name": "Pi USB speaker", "type": "usb"},
             ]
-            outputs.extend(self._discover_cast(True))
-            outputs.extend(self._discover_airplay(True))
+            # Cast and AirPlay mDNS sweeps are independent 4s scans — run them
+            # concurrently (~4s total) instead of back-to-back (~8s).
+            _cast, _air = [[]], [[]]
+
+            def _run_cast():
+                try:
+                    _cast[0] = self._discover_cast(True)
+                except Exception:
+                    pass
+
+            def _run_air():
+                try:
+                    _air[0] = self._discover_airplay(True)
+                except Exception:
+                    pass
+
+            tc = threading.Thread(target=_run_cast, name="atc-scan-cast")
+            ta = threading.Thread(target=_run_air, name="atc-scan-airplay")
+            tc.start(); ta.start()
+            tc.join(timeout=10); ta.join(timeout=10)
+            outputs.extend(_cast[0])
+            outputs.extend(_air[0])
             with self._lock:
                 self._outputs_cache = outputs
                 self._outputs_ts = _now()
