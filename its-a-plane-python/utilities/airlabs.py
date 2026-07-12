@@ -106,18 +106,37 @@ def get_flight_schedule(callsign):
             _cache[callsign] = (None, time())
             return None
 
-        # Pick the next upcoming segment (smallest dep_time_ts in the future)
         now = time()
-        upcoming = [
-            s for s in schedules
-            if s.get("dep_time_ts") and s["dep_time_ts"] > now - 3600  # within last hour or future
-        ]
 
+        def _arr_ts(s):
+            """Best-effort arrival unix ts: explicit field, else dep+duration."""
+            a = s.get("arr_time_ts")
+            if a:
+                return a
+            d = s.get("dep_time_ts")
+            dur = s.get("duration")   # minutes
+            if d and dur:
+                try:
+                    return d + int(dur) * 60
+                except (TypeError, ValueError):
+                    return d
+            return d
+
+        # Keep legs whose ARRIVAL is still in the future (currently airborne or
+        # upcoming), with a 2h grace so a just-landed leg lingers long enough
+        # for the caller's "+2h past arrival -> wipe" logic to fire. Filtering
+        # on DEPARTURE within the last hour dropped the current leg of any
+        # flight airborne >1h and returned TOMORROW's leg, whose future arrival
+        # defeated that wipe (a dead SCHEDULED flight stayed up to the 36h cap).
+        upcoming = [s for s in schedules
+                    if _arr_ts(s) and _arr_ts(s) > now - 7200]
         if not upcoming:
-            # Fall back to first result if nothing upcoming
             upcoming = schedules
 
-        # Sort by departure time, pick earliest future one
+        # Among the still-relevant legs, pick the one DEPARTING soonest: an
+        # in-air leg has a past dep_time_ts (sorts first, so it's chosen over a
+        # later connecting/next-day leg), and among future legs the next to
+        # depart wins.
         upcoming.sort(key=lambda s: s.get("dep_time_ts", 0))
         best = upcoming[0]
 

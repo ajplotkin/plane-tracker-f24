@@ -389,6 +389,10 @@ function drawDate(suppressDate) {
     // Current slot = S + floor((now - T) / C) mod total
     const dd = state.date_display;
     if (!dd || !dd.items || dd.items.length === 0) return;
+    // Staleness gate (like alerts/flights): if the display process stopped, the
+    // web app keeps serving the last date_display forever — after midnight the
+    // mirror would show yesterday's date and rotate stale tide/water items.
+    if (serverNow() - (dd.ts || 0) > 120) return;
 
     const elapsed = serverNow() - (dd.ts || 0);
     const slot = ((dd.slot || 0) + Math.floor(elapsed / (dd.cycle_secs || 5))) % dd.items.length;
@@ -399,10 +403,12 @@ function drawDate(suppressDate) {
     // (date.py:46-52); null when unavailable → date rendered in RED
     let moonPhase = null;
     if (state.forecast && state.forecast.length > 0) {
-        const now = new Date();
+        // Panel-local "today" (utc_offset_sec), not the browser's — else a
+        // remote viewer matches the wrong forecast day and the date goes red.
+        const now = new Date(serverNow() * 1000 + (state.utc_offset_sec || 0) * 1000);
         const pad2 = n => String(n).padStart(2, '0');
-        const todayStr = now.getFullYear() + '-' + pad2(now.getMonth() + 1) +
-            '-' + pad2(now.getDate());
+        const todayStr = now.getUTCFullYear() + '-' + pad2(now.getUTCMonth() + 1) +
+            '-' + pad2(now.getUTCDate());
         for (const day of state.forecast) {
             if ((day.startTime || '').slice(0, 10) === todayStr) {
                 const mp = day.values?.moonPhase;
@@ -450,15 +456,18 @@ function drawForecast() {
     if (!state.forecast || state.forecast.length < 3) return;
     if (hasFlight()) return;
 
-    // Midnight switch: skip forecast entries before today (daysforecast.py)
-    // E1: compare LOCAL dates (astimezone() logic), not UTC toISOString
-    const now = new Date();
+    // Midnight switch: skip forecast entries before today (daysforecast.py).
+    // Use the PANEL's local date (utc_offset_sec), not the browser's — a remote
+    // viewer in another timezone otherwise sees the wrong "today" and the first
+    // column skips/repeats a day vs the LED. Same shift-by-offset + read-UTC
+    // trick drawClock uses.
+    const _off = (state.utc_offset_sec || 0) * 1000;
     const pad2 = n => String(n).padStart(2, '0');
-    const localDateStr = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) +
-        '-' + pad2(d.getDate());
-    const todayStr = localDateStr(now);
+    const panelDateStr = ms => { const d = new Date(ms + _off);
+        return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate()); };
+    const todayStr = panelDateStr(serverNow() * 1000);
     const filtered = state.forecast.filter(f =>
-        localDateStr(new Date(f.startTime)) >= todayStr);
+        panelDateStr(new Date(f.startTime).getTime()) >= todayStr);
     if (filtered.length < 3) return;
 
     const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -468,10 +477,11 @@ function drawForecast() {
         const f = filtered[i];
         if (!f) continue;
         const x = i * colW + 1;
-        const dt = new Date(f.startTime);
+        const dt = new Date(new Date(f.startTime).getTime() + _off);
 
-        // Day name centered: offset + (21-12)//2 + 1 = offset + 5
-        text(days[dt.getDay()], x + 5, 17, C.planeDist, XS_W);
+        // Day name centered: offset + (21-12)//2 + 1 = offset + 5.
+        // getUTCDay() on the offset-shifted instant = panel-local weekday.
+        text(days[dt.getUTCDay()], x + 5, 17, C.planeDist, XS_W);
 
         // Icon centered: offset + (21-10)//2 = offset + 5, at y=17
         const code = f.values?.weatherCodeFullDay;
