@@ -138,6 +138,13 @@ class ATCAudioManager:
         self._centers_base = _seed_raw.get("centers", {})
         self._centers = dict(self._centers_base)
         self._discovered = _load_json(_DISCOVERED_CACHE, {})  # icao -> {feeds, ts}
+        # Background feed-discovery: _feeds_for_airport enqueues cache-misses
+        # here and a worker probes them OFF-lock, so auto-tune never fires a
+        # ~20s probe sweep while holding self._lock (which stalled status() and
+        # the mirror poll).
+        self._discover_queue = set()          # icaos pending discovery
+        self._discover_lock = threading.Lock()
+        self._discover_thread = None
 
         # Persisted runtime state. First run (no state file yet): seed from
         # the ATC_* config keys so a configured mode/station/output applies
@@ -357,8 +364,11 @@ class ATCAudioManager:
         return True
 
     def _feeds_for_airport(self, icao):
-        """Return {twr, app, ...} feed dict for an airport: seed first, then
-        cached discovery, then live probing of common suffixes."""
+        """Return {twr, app, ...} for an airport WITHOUT any network probe:
+        seed first, then the discovery cache. A cache miss is handed to the
+        background discovery worker (probing under self._lock previously stalled
+        status()/the mirror ~20s per cache-cold airport) and returns {} for now;
+        the next tick (~5s) picks up the worker's cached result."""
         icao = (icao or "").upper()
         if not icao:
             return {}
@@ -366,20 +376,63 @@ class ATCAudioManager:
             return self._seed[icao].get("feeds", {})
         cached = self._discovered.get(icao)
         if cached is not None:
-            # Empty results are cached too (1 day) — without a negative cache
-            # every tick() re-probes ~10 URLs under the lock for an airport
-            # that has no LiveATC feeds, stalling /api/atc/* for ~20s each time.
+            # Empty results are cached too (1 day) — the negative cache keeps a
+            # feedless airport from being re-queued for probing every tick.
             ttl = 30 * 86400 if cached.get("feeds") else 86400
             if (_now() - cached.get("ts", 0)) < ttl:
                 return cached.get("feeds", {})
-        # During the post-403 cooldown, don't probe and — critically — don't
-        # cache an empty result as "no feeds": we simply can't know right now.
-        if _now() < self._probe_cooldown_until:
-            return {}
-        # Probe common suffixes. LiveATC mounts are usually the lowercase ICAO
-        # (kbos_twr) but sometimes drop the K. Our K-prefix guess from a 3-letter
-        # code is wrong for Alaska/Hawaii (PANC/PHNL, not KANC/KHNL), so a
-        # p-prefixed base is probed too; the negative cache keeps this bounded.
+        # Not cached: queue for OFF-lock discovery (never probe here). Skip
+        # during the post-403 cooldown so we don't queue work we can't do.
+        if _now() >= self._probe_cooldown_until:
+            self._enqueue_discovery(icao)
+        return {}
+
+    def _enqueue_discovery(self, icao):
+        """Queue an airport for background feed discovery and (re)start the
+        worker. Safe to call under self._lock — only touches the small queue."""
+        with self._discover_lock:
+            self._discover_queue.add(icao)
+            if self._discover_thread is None or not self._discover_thread.is_alive():
+                try:
+                    self._discover_thread = threading.Thread(
+                        target=self._discover_worker, daemon=True, name="atc-discover")
+                    self._discover_thread.start()
+                except Exception:
+                    self._discover_thread = None   # OOM — retry on next enqueue
+
+    def _discover_worker(self):
+        """Probe queued airports' feeds OFF-lock, then cache the result. Gentle:
+        one airport at a time with a small pause, and it honours the 403
+        cooldown so a burst of new overhead airports can't hammer LiveATC."""
+        while True:
+            with self._discover_lock:
+                if not self._discover_queue:
+                    self._discover_thread = None
+                    return
+                icao = self._discover_queue.pop()
+            if _now() < self._probe_cooldown_until:
+                with self._discover_lock:      # in cooldown — requeue, back off
+                    self._discover_queue.add(icao)
+                time.sleep(5)
+                continue
+            feeds, complete = self._probe_airport_feeds(icao)
+            if complete:
+                with self._lock:               # brief, no network
+                    self._discovered[icao] = {"feeds": feeds, "ts": _now()}
+                try:
+                    _atomic_write(_DISCOVERED_CACHE, self._discovered)
+                except Exception:
+                    pass
+            time.sleep(1.0)                     # gentle pacing between airports
+
+    def _probe_airport_feeds(self, icao):
+        """The actual suffix-probe sweep for a non-seed airport — runs ONLY in
+        the discovery worker (off-lock). Returns (feeds, complete); complete is
+        False if the 403 cooldown was hit mid-sweep (caller must not cache).
+
+        LiveATC mounts are usually the lowercase ICAO (kbos_twr) but sometimes
+        drop the K; a K-prefix guess is wrong for Alaska/Hawaii (PANC/PHNL), so
+        a p-prefixed base is probed too."""
         found = {}
         base = icao.lower()
         bases = [base]
@@ -394,12 +447,8 @@ class ATCAudioManager:
                     found.setdefault(kind, code)
                     break
                 if v is None:
-                    # Hit the 403 cooldown mid-sweep: results are incomplete —
-                    # return what we have but cache nothing.
-                    return found
-        self._discovered[icao] = {"feeds": found, "ts": _now()}
-        _atomic_write(_DISCOVERED_CACHE, self._discovered)
-        return found
+                    return found, False        # cooldown mid-sweep — incomplete
+        return found, True
 
     def _fallback_station_locked(self):
         """Default station when no overhead traffic drives the choice.
@@ -456,12 +505,12 @@ class ATCAudioManager:
         """Score by AIRPORT (not per-flight) to prevent thrashing. Returns a
         (feed_code, airport_icao) tuple, or (None, None).
 
-        TODO(lock): probe under lock — this (via _feeds_for_airport/_feed_ok)
-        can fire up to ~15 ranged GETs × 2s while callers (tick auto branch,
-        _ensure_station_locked) hold self._lock, stalling status() and the
-        mirror poll. Restructuring to probe on a snapshot outside the lock
-        touches every caller; the negative discovery cache and the 403
-        cooldown bound the damage for now."""
+        Feed DISCOVERY (the ~15-URL sweep for a non-seed airport) now runs in a
+        background worker — _feeds_for_airport only reads the cache or enqueues,
+        so it never probes under self._lock. The single per-candidate
+        _feed_ok() verify-probe (~2s, only on a station CHANGE to a not-yet-seen
+        feed) is the sole remaining under-lock network call; it's dwell-throttled
+        and acceptable."""
         flights = self._read_overhead()
         scores = {}   # icao -> score
         prefer_app = {}  # icao -> bool (overhead traffic at altitude)
