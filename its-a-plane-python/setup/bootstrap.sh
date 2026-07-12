@@ -18,10 +18,13 @@
 #   curl -sSL https://raw.githubusercontent.com/a10kiloham/plane-tracker-rgb-pi/main/its-a-plane-python/setup/bootstrap.sh | sudo bash
 #
 set -e
+# pipefail so a failed `pip install ... | tail` surfaces (tail's 0 exit
+# otherwise masked dependency-install failures and the script reported success).
+set -o pipefail
 
 # --- Configuration ---
 REPO_URL="https://github.com/a10kiloham/plane-tracker-rgb-pi.git"
-REPO_DIR="/home/pi/plane-tracker-rgb-pi"
+REPO_DIR="/home/robk/plane-tracker-rgb-pi"
 ENV_DEST="/etc/plane-tracker.env"
 NEW_SERVICE="plane-tracker.service"
 OLD_SERVICE="flighttracker.service"
@@ -97,7 +100,7 @@ echo "→ Installing Python dependencies into venv..."
 "$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements.txt" 2>&1 | tail -5
 
 # Install rgbmatrix from source if the rpi-rgb-led-matrix repo exists
-RGB_MATRIX_DIR="/home/pi/rpi-rgb-led-matrix"
+RGB_MATRIX_DIR="/home/robk/rpi-rgb-led-matrix"
 if [ -d "$RGB_MATRIX_DIR/bindings/python" ]; then
     echo "→ Installing rgbmatrix Python bindings into venv..."
     cd "$RGB_MATRIX_DIR/bindings/python"
@@ -126,15 +129,29 @@ if [ ! -f "$ENV_DEST" ]; then
         echo "   Copied .env.example → $ENV_DEST"
         echo ""
         echo "   You need to add your API keys."
-        read -p "   FR24 API Key (subscription_key|token): " FR24_KEY
-        read -p "   Tomorrow.io API Key: " TOMORROW_KEY
+        # Read from the terminal, not stdin — the documented install is
+        # `curl ... | sudo bash`, where stdin is the script pipe and a plain
+        # `read` would consume script text / hit EOF.
+        read -p "   FR24 API Key (subscription_key|token): " FR24_KEY </dev/tty
+        read -p "   Tomorrow.io API Key: " TOMORROW_KEY </dev/tty
 
-        if [ -n "$FR24_KEY" ]; then
-            sed -i "s|^FR24_API_KEY=.*|FR24_API_KEY=$FR24_KEY|" "$ENV_DEST"
-        fi
-        if [ -n "$TOMORROW_KEY" ]; then
-            sed -i "s|^TOMORROW_API_KEY=.*|TOMORROW_API_KEY=$TOMORROW_KEY|" "$ENV_DEST"
-        fi
+        # Update via python3, not sed: the FR24 key format is
+        # 'subscription_key|token' and that literal '|' (or an '&'/'\\') breaks
+        # a sed s|...| expression.
+        _set_env() {  # _set_env KEY VALUE
+            python3 - "$ENV_DEST" "$1" "$2" <<'PY'
+import sys
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(path).read().splitlines()
+pfx = key + "="
+out = [f"{key}={val}" if l.startswith(pfx) else l for l in lines]
+if not any(l.startswith(pfx) for l in lines):
+    out.append(f"{key}={val}")
+open(path, "w").write("\n".join(out) + "\n")
+PY
+        }
+        [ -n "$FR24_KEY" ] && _set_env FR24_API_KEY "$FR24_KEY"
+        [ -n "$TOMORROW_KEY" ] && _set_env TOMORROW_API_KEY "$TOMORROW_KEY"
     fi
 
     chown root:root "$ENV_DEST"

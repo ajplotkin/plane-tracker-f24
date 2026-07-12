@@ -290,6 +290,13 @@ class ClockScene(object):
             slot = (self._alert_cycle_counter // cycle_secs) % len(alert_items)
             alert_text, alert_color = alert_items[slot]
         else:
+            # slot/cycle_secs MUST be defined here too — the cache write below
+            # references them. When alerts clear to empty, leaving them unset
+            # raised NameError (swallowed by the bare except), so alerts.json
+            # was never updated to the empty state and the mirror kept showing
+            # a ghost alert forever.
+            cycle_secs = _ALERT_CYCLE_SECONDS
+            slot = 0
             alert_text, alert_color = None, None
 
         # Write pre-formatted alerts to cache for display mirror.
@@ -308,9 +315,15 @@ class ClockScene(object):
             import json, os, time as _time
             cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cache")
             os.makedirs(cache_dir, exist_ok=True)
-            with open(os.path.join(cache_dir, "alerts.json"), "w") as f:
+            # Atomic write (tmp + os.replace): the web mirror polls alerts.json
+            # ~1x/s; a plain open('w') truncates first, so a poll mid-write read
+            # an empty file and the alert row flashed blank.
+            _ap = os.path.join(cache_dir, "alerts.json")
+            _tmp = f"{_ap}.tmp.{os.getpid()}"
+            with open(_tmp, "w") as f:
                 json.dump({"alerts": cache_alerts, "slot": slot,
                            "cycle_secs": cycle_secs, "ts": _time.time()}, f)
+            os.replace(_tmp, _ap)
         except Exception:
             pass
 

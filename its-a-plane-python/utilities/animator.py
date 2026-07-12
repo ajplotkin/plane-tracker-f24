@@ -1,4 +1,7 @@
+import logging
 from time import sleep, monotonic
+
+_log = logging.getLogger(__name__)
 
 DELAY_DEFAULT = 0.01
 
@@ -42,24 +45,37 @@ class Animator(object):
         next_frame = monotonic()
         while True:
             for keyframe in self.keyframes:
-                # If divisor == 0 then only run once on first loop
-                if self.frame == 0:
-                    if keyframe.properties["divisor"] == 0:
-                        keyframe()
+                # A single scene keyframe raising must NOT kill the animation
+                # loop — that propagates out of play() and freezes the ENTIRE
+                # panel on the last frame. Isolate each keyframe: log (throttled
+                # per keyframe to avoid flooding at frame rate) and continue.
+                try:
+                    # If divisor == 0 then only run once on first loop
+                    if self.frame == 0:
+                        if keyframe.properties["divisor"] == 0:
+                            keyframe()
 
-                # Otherwise perform normal operation
-                if (
-                    self.frame > 0
-                    and keyframe.properties["divisor"]
-                    and not (
-                        (self.frame - keyframe.properties["offset"])
-                        % keyframe.properties["divisor"]
-                    )
-                ):
-                    if keyframe(keyframe.properties["count"]):
-                        keyframe.properties["count"] = 0
-                    else:
-                        keyframe.properties["count"] += 1
+                    # Otherwise perform normal operation
+                    if (
+                        self.frame > 0
+                        and keyframe.properties["divisor"]
+                        and not (
+                            (self.frame - keyframe.properties["offset"])
+                            % keyframe.properties["divisor"]
+                        )
+                    ):
+                        if keyframe(keyframe.properties["count"]):
+                            keyframe.properties["count"] = 0
+                        else:
+                            keyframe.properties["count"] += 1
+                except Exception:
+                    _name = getattr(keyframe, "__name__", repr(keyframe))
+                    _errs = self.__dict__.setdefault("_keyframe_err_ts", {})
+                    _t = monotonic()
+                    if _t - _errs.get(_name, 0.0) > 60:
+                        _errs[_name] = _t
+                        _log.exception(
+                            "Animator: keyframe %s raised (continuing)", _name)
 
             self.frame += 1
             next_frame += self._delay

@@ -659,9 +659,14 @@ function drawFlight() {
     const localMaxW = Math.max(fW, pW);
 
     // Scroll synced from LED's scroll_epoch.
-    // C1: Python wraps when pos + max_width < 0 starting from 64, so the
-    // cycle length is max_width + COLS + 1
-    const cyclePx = (state.scroll_epoch?.max_width ?? localMaxW) + COLS + 1;
+    // Prefer the LED-published `cycle` (which already accounts for the
+    // MIN_PAGE_FRAMES page-hold on short text). Fall back to max_width — but
+    // guard 0: on every flight-data change Python clears its widths and writes
+    // max_width:0, and `?? localMaxW` treated 0 as valid, collapsing the cycle
+    // to ~65px so text restarted every ~6.5s. `|| localMaxW` falls back on 0.
+    const epochMaxW = state.scroll_epoch?.max_width;
+    const cyclePx = state.scroll_epoch?.cycle
+        || ((epochMaxW || localMaxW) + COLS + 1);
     // C5: no epoch ts -> sticky client-side epoch, captured once
     let epochTs = state.scroll_epoch?.ts;
     if (epochTs == null) {
@@ -1447,7 +1452,14 @@ ATC.vol.addEventListener('change', () => {
     setTimeout(() => { ATC.volDragging = false; }, 600);  // let the poll resume
 });
 
+let _pollInFlight = false;
 async function poll() {
+    // In-flight guard: on a slow/hung server (Pi under load, WiFi blip) the
+    // 1s setInterval would stack concurrent fetches, and an older response
+    // could resolve after a newer one — snapping flights/scroll backwards and
+    // polluting the clock-skew average. Skip if a poll is already running.
+    if (_pollInFlight) return;
+    _pollInFlight = true;
     try {
         const r = await fetch('/api/display-state');
         if (!r.ok) throw new Error(r.status);
@@ -1487,6 +1499,8 @@ async function poll() {
     } catch (e) {
         document.getElementById('status').textContent = 'Error: ' + e.message;
         document.getElementById('status').className = 'status error';
+    } finally {
+        _pollInFlight = false;
     }
 }
 

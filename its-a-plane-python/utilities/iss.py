@@ -113,13 +113,28 @@ def _fetch_tle():
 
 
 def _ensure_tle():
-    """Make sure we have a TLE, fetching if needed."""
+    """Make sure we have a TLE, fetching if needed. Called ONLY from the
+    background compute thread (never the render thread — see _have_tle)."""
     if _tle_lines and (time.time() - _tle_ts) < _TLE_REFRESH:
         return True
     if _load_tle_cache():
         if (time.time() - _tle_ts) < _TLE_REFRESH:
             return True
-    return _fetch_tle()
+    if _fetch_tle():
+        return True
+    # Fetch failed: a stale-but-loaded TLE (12-24h old) is still accurate to
+    # well under a second for LEO pass prediction — use it rather than going
+    # blank for hours.
+    return bool(_tle_lines)
+
+
+def _have_tle():
+    """True if a TLE is available WITHOUT any network fetch (in-memory or a
+    disk-cache read). Used by the render-thread visibility check so it never
+    blocks on HTTP; a stale TLE is fine for real-time visibility."""
+    if _tle_lines:
+        return True
+    return _load_tle_cache()
 
 
 # ── Pass computation ────────────────────────────────────────────────────────
@@ -283,7 +298,10 @@ def _refresh():
     # Schedule non-blocking background compute if interval elapsed
     if now >= _next_retry_after and not _refresh_pending:
         _refresh_pending = True
-        threading.Thread(target=_background_compute, args=(location[0], location[1]), daemon=True).start()
+        try:
+            threading.Thread(target=_background_compute, args=(location[0], location[1]), daemon=True).start()
+        except Exception:
+            _refresh_pending = False  # start() failed (OOM) — retry next call
 
     return _cached_passes or []
 
@@ -388,7 +406,9 @@ def is_iss_visible_now(lat, lon):
     Returns True if the ISS is currently visible (observer in twilight/night
     and ISS is sunlit).  Cheap — single ephem computation, <1ms.
     """
-    if ephem is None or not _ensure_tle():
+    # _have_tle (not _ensure_tle) — this runs once per second on the render
+    # thread during a pass; it must never trigger a blocking TLE fetch.
+    if ephem is None or not _have_tle():
         return False
     name, line1, line2 = _tle_lines
     iss = ephem.readtle(name, line1, line2)

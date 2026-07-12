@@ -272,16 +272,30 @@ class ATCAudioManager:
         self._seed = merged
         self._centers = centers
 
+    @staticmethod
+    def _hhmm_to_min(s):
+        """'HH:MM' -> minutes since midnight, or None. Tolerates a missing
+        zero-pad ('6:00'), which broke the old lexicographic compare:
+        '22:00' < '6:00' is true, so a '22:00-6:00' window never wrapped and
+        auto ATC played at 2am."""
+        try:
+            h, m = str(s).strip().split(":")
+            return int(h) * 60 + int(m)
+        except Exception:
+            return None
+
     def _in_quiet_hours(self, when=None):
         try:
-            now = (when or datetime.now()).strftime("%H:%M")
             start, end = self._quiet
-            if start == end:
+            a = self._hhmm_to_min(start)
+            b = self._hhmm_to_min(end)
+            if a is None or b is None or a == b:
                 return False
-            if start < end:
-                return start <= now < end
-            # Wraps midnight (e.g. 22:00-06:00)
-            return now >= start or now < end
+            now = when or datetime.now()
+            cur = now.hour * 60 + now.minute
+            if a < b:
+                return a <= cur < b
+            return cur >= a or cur < b   # wraps midnight
         except Exception:
             return False
 

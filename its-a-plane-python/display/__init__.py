@@ -40,26 +40,48 @@ MIN_PAGE_FRAMES = int(frames.PER_SECOND * 10)
 # Both lines scroll together; the wider one determines when to reset/advance.
 
 
+# Per-name config reads (getattr, not `from config import (...)`) so a single
+# missing/renamed key can't silently discard ALL configured values via one
+# ImportError. Also tolerant of config failing to import at all (tests).
 try:
-    from config import (
-        BRIGHTNESS,
-        GPIO_SLOWDOWN,
-        HAT_PWM_ENABLED,
-        BRIGHTNESS_NIGHT,
-        NIGHT_START,
-        NIGHT_END,
-        NIGHT_BRIGHTNESS,
-        LED_RGB_SEQUENCE,
-    )
-    NIGHT_START = datetime.strptime(NIGHT_START, "%H:%M")
-    NIGHT_END = datetime.strptime(NIGHT_END, "%H:%M")
+    import config as _cfg
+except Exception:
+    _cfg = None
 
-except (ImportError, NameError):
-    BRIGHTNESS = 100
-    GPIO_SLOWDOWN = 1
-    HAT_PWM_ENABLED = True
-    NIGHT_BRIGHTNESS = False
-    LED_RGB_SEQUENCE = "RGB"
+
+def _cfg_get(name, default):
+    return getattr(_cfg, name, default) if _cfg is not None else default
+
+
+def _parse_hhmm(s, default):
+    """'HH:MM' -> time object; never raises (a bad NIGHT_START/END value written
+    to config.json must not crash the display at import)."""
+    for candidate in (str(s), default):
+        try:
+            return datetime.strptime(candidate, "%H:%M").time()
+        except (ValueError, TypeError):
+            continue
+    return datetime.strptime("22:00", "%H:%M").time()
+
+
+BRIGHTNESS = _cfg_get("BRIGHTNESS", 100)
+GPIO_SLOWDOWN = _cfg_get("GPIO_SLOWDOWN", 1)
+HAT_PWM_ENABLED = _cfg_get("HAT_PWM_ENABLED", True)
+BRIGHTNESS_NIGHT = _cfg_get("BRIGHTNESS_NIGHT", 50)
+NIGHT_BRIGHTNESS = _cfg_get("NIGHT_BRIGHTNESS", False)
+LED_RGB_SEQUENCE = _cfg_get("LED_RGB_SEQUENCE", "RGB")
+NIGHT_START = _parse_hhmm(_cfg_get("NIGHT_START", "22:00"), "22:00")
+NIGHT_END = _parse_hhmm(_cfg_get("NIGHT_END", "06:00"), "06:00")
+
+
+def _in_night_window(now_t, start_t, end_t):
+    """True if now_t falls in [start_t, end_t), handling overnight wrap
+    (22:00-06:00) AND same-day windows (00:30-07:00). Equal start/end => never."""
+    if start_t == end_t:
+        return False
+    if start_t < end_t:
+        return start_t <= now_t < end_t
+    return now_t >= start_t or now_t < end_t
 
 
 def adjust_brightness(matrix):
@@ -67,13 +89,7 @@ def adjust_brightness(matrix):
         return
 
     now = datetime.now().time().replace(second=0, microsecond=0)
-    night_start_time = NIGHT_START.time().replace(second=0, microsecond=0)
-    night_end_time = NIGHT_END.time().replace(second=0, microsecond=0)
-
-    if night_end_time <= now < night_start_time:
-        new_brightness = BRIGHTNESS
-    else:
-        new_brightness = BRIGHTNESS_NIGHT
+    new_brightness = BRIGHTNESS_NIGHT if _in_night_window(now, NIGHT_START, NIGHT_END) else BRIGHTNESS
 
     if matrix.brightness != new_brightness:
         matrix.brightness = new_brightness
@@ -174,11 +190,21 @@ class Display(
                 iss = self.overhead.iss_pass_data
                 if not (iss and iss.get("is_active")):
                     self._iss_plane_shown = False
-                self._data = new_data
+
+            # Always refresh the telemetry snapshot, even when the flight SET is
+            # unchanged. flights_match() compares only (callsign, direction), so
+            # a loitering aircraft with fresh distance/altitude/heading would
+            # otherwise keep displaying its first-sighting values for the whole
+            # dwell. (Upstream assigns self._data unconditionally.)
+            self._data = new_data
 
             reset_required = there_is_data and data_is_different
 
-            if reset_required:
+            # Don't blank a live ISS takeover frame: reset_scene() -> clear
+            # would wipe the pass display, and the ISS scene's incremental
+            # renderer never repaints its info line / already-flown bar.
+            # (advance_scroll guards the same way.)
+            if reset_required and not getattr(self, "_iss_active", False):
                 self.reset_scene()
 
     def report_scroll_width(self, region, width):
@@ -229,13 +255,15 @@ class Display(
         the flight display until the flag flips, then the ISS takeover.
         """
         try:
-            import json, time
+            import json, time, os
             max_w = max(self._scroll_widths.values()) if self._scroll_widths else 0
-            with open(self._scroll_epoch_file, "w") as f:
+            tmp = f"{self._scroll_epoch_file}.tmp.{os.getpid()}"
+            with open(tmp, "w") as f:
                 json.dump({"ts": time.time(), "idx": self._data_index,
                            "max_width": max_w, "pos": self._scroll_pos,
                            "cycle": max(max_w + screen.WIDTH + 1, MIN_PAGE_FRAMES),
                            "iss_plane_shown": getattr(self, "_iss_plane_shown", False)}, f)
+            os.replace(tmp, self._scroll_epoch_file)
         except Exception:
             pass
 

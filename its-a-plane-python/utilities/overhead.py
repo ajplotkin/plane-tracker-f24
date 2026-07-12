@@ -191,18 +191,35 @@ def safe_load_json(path: str):
         return []
 
 
+def _atomic_dump(path: str, data):
+    """Write JSON to a temp file in the same dir, then os.replace() it into
+    place. The rename is atomic on POSIX, so a reader in the OTHER process
+    (web dashboard, ATC ticker) never sees a truncated/half-written file.
+    This is the highest-frequency cross-process file (current_overhead.json,
+    flight_counter.json, close/farthest.txt) — a plain open('w') truncates to
+    0 bytes first, which is exactly the torn read the readers were hitting."""
+    d = os.path.dirname(path) or "."
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    os.replace(tmp, path)
+
+
 def safe_write_json(path: str, data):
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+        _atomic_dump(path, data)
     except PermissionError:
         logger.warning(f"Permission denied writing {path} — attempting to fix")
         try:
             os.chmod(path, 0o666)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
+            _atomic_dump(path, data)
         except Exception as e2:
             logger.error(f"Cannot write {path}: {e2}")
+            # Clean up any orphaned tmp file from the failed attempt.
+            try:
+                os.remove(f"{path}.tmp.{os.getpid()}")
+            except OSError:
+                pass
             return
     # Best-effort: keep the file world-writable so the display (root/daemon)
     # and web (user) processes can both update it. chmod by a NON-OWNER
@@ -713,7 +730,17 @@ class Overhead:
                 return
             self._processing = True
         self._write_processing_flag(True)
-        Thread(target=self._grab, daemon=True).start()
+        # If Thread.start() raises (e.g. 'can't start new thread' under memory
+        # pressure on the 512MB Pi), _processing would stay True forever and
+        # every future grab_data would skip — the display would freeze on stale
+        # data permanently. Reset the flag on failure so the next cycle retries.
+        try:
+            Thread(target=self._grab, daemon=True).start()
+        except Exception as e:
+            logger.error(f"grab_data: could not start grab thread: {e}")
+            with self._lock:
+                self._processing = False
+            self._write_processing_flag(False)
 
     @staticmethod
     def _write_processing_flag(value):
@@ -976,9 +1003,18 @@ class Overhead:
                             "data_source": route_source,
                         })
 
-                        log_flight_data(entry)
-                        log_farthest_flight(entry)
-                        log_flight_count(callsign, entry)
+                        # Isolate the side-channel logging: these run AFTER the
+                        # entry was appended, so if one raises (e.g. a
+                        # PermissionError the counter reader doesn't catch) it
+                        # must not reach the outer retry handler — that would
+                        # re-run the whole block and append this flight a 2nd/3rd
+                        # time (duplicate on the display + double-counted stats).
+                        try:
+                            log_flight_data(entry)
+                            log_farthest_flight(entry)
+                            log_flight_count(callsign, entry)
+                        except Exception as _log_e:
+                            logger.warning(f"flight logging failed for {callsign}: {_log_e}")
                         break
 
                     except Exception as e:
@@ -1525,15 +1561,18 @@ class Overhead:
                             if len(candidates) == 1:
                                 match = candidates[0]
                             elif len(candidates) > 1:
-                                # Multiple matches — pick closest to scheduled departure
-                                dep_ts = sched.get("dep_time_ts")
-                                if dep_ts:
-                                    # Pick flight with latest departure (most recently departed)
-                                    candidates.sort(
-                                        key=lambda f: abs(
-                                            (getattr(f, 'time', None) or 0) - dep_ts
-                                        )
-                                    )
+                                # Multiple regional flights on the same route.
+                                # The old sort keyed on getattr(f,'time') — a
+                                # field LiveFlight does NOT have — so the key was
+                                # always 0, the sort was a no-op, and it locked
+                                # onto an arbitrary feed-order candidate. There's
+                                # no departure-time field to disambiguate by, so
+                                # pick the one NEAREST home (the aircraft actually
+                                # overhead), deterministically.
+                                try:
+                                    candidates.sort(key=lambda f: distance_from_flight_to_home(f))
+                                except Exception:
+                                    pass
                                 match = candidates[0]
                             if match:
                                 self._tracked_alt_callsign = (match.callsign or "").upper()

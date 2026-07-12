@@ -565,9 +565,15 @@ class FR24Client:
             self._fr24_ok = False
             return {}
 
-        # Cache the result (even empty dicts, to avoid repeated failed lookups)
         if result:
             self._cache.set_cached_flight_details(flight.flight_id, result)
+        else:
+            # Briefly negative-cache empty results. The comment always intended
+            # this ("even empty dicts, to avoid repeated failed lookups") but
+            # the code skipped it, so overhead's per-cycle retry made 3
+            # back-to-back gRPC calls per flight. Short TTL so a flight that
+            # gains details later still picks them up.
+            self._cache.set_cached_flight_details(flight.flight_id, {}, ttl=120)
 
         return result
 

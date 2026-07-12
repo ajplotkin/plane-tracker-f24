@@ -610,6 +610,18 @@ def api_config_post():
     if not data:
         return jsonify({"error": "No valid config keys provided"}), 400
 
+    # Never persist a masked secret. GET /api/config returns keys as
+    # 'ab12****wxyz'; a client that reads then writes the config back (a
+    # backup/restore script, a second UI, curl) would otherwise overwrite the
+    # real API keys with their masks and break auth. The JS strips these too,
+    # but the server must not rely on that being the only writer.
+    _SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY",
+                    "NPS_API_KEY", "OWM_API_KEY"}
+    data = {k: v for k, v in data.items()
+            if not (k in _SECRET_KEYS and isinstance(v, str) and "*" in v)}
+    if not data:
+        return jsonify({"error": "No valid config keys provided"}), 400
+
     # Ensure config directory exists
     config_dir = os.path.join(BASE_DIR, "config")
     os.makedirs(config_dir, exist_ok=True)

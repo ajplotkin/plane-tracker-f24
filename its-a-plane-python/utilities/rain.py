@@ -109,12 +109,16 @@ def _refresh():
             _cached_ts = disk_ts
             logger.info("[Rain] Loaded from disk cache")
 
-    # Fetch from API if interval elapsed
+    # Fetch from API if interval elapsed. This runs synchronously on the 1 Hz
+    # clock-scene render thread; advance _cached_ts BEFORE the blocking call so
+    # an OWM outage / revoked key / 429 can't drive a fetch every second (it
+    # left _cached_ts unchanged on failure, and never-succeeded left
+    # _cached_data None, so both paths re-fetched every frame).
     if (now - _cached_ts) >= _POLL_INTERVAL:
+        _cached_ts = now
         data = _fetch(location[0], location[1], api_key)
         if data:
             _cached_data = data
-            _cached_ts = now
 
     return _cached_data
 

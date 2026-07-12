@@ -191,8 +191,13 @@ def _save_file_cache(path, data, units=None):
         obj = {"data": data, "ts": time.time()}
         if units:
             obj["units"] = units
-        with open(path, "w") as f:
+        # Atomic (tmp + os.replace) — the web dashboard reads temperature.json /
+        # forecast.json cross-process; a plain open('w') truncates first and a
+        # concurrent read got a partial doc. (Matches the hourly_uv writer below.)
+        tmp = f"{path}.tmp.{_os.getpid()}"
+        with open(tmp, "w") as f:
             _json.dump(obj, f)
+        _os.replace(tmp, path)
     except (PermissionError, OSError) as e:
         logger.warning(f"Cannot write cache {path}: {e}")
 

@@ -207,7 +207,10 @@ def _refresh():
     # Schedule non-blocking background fetch if interval elapsed
     if (now - _cached_ts) >= _POLL_INTERVAL and not _refresh_pending:
         _refresh_pending = True
-        threading.Thread(target=_background_fetch, daemon=True).start()
+        try:
+            threading.Thread(target=_background_fetch, daemon=True).start()
+        except Exception:
+            _refresh_pending = False  # start() failed (OOM) — retry next call
 
     return _cached_data
 

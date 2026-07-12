@@ -612,9 +612,24 @@
 
         const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME'];
         const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
+        // Fields where an empty value is meaningful ("blank = disabled") and
+        // must be sent so the user can turn them off.
+        const CLEARABLE_FIELDS = ['TIDE_STATION', 'WATER_TEMP_STATION', 'AIRPORT_STATUS_LIST',
+            'BLOCKED_CALLSIGNS', 'ATC_CUSTOM_FEEDS', 'ATC_QUIET_HOURS',
+            'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END'];
 
         function toggleSection(header) {
             header.parentElement.classList.toggle('collapsed');
+        }
+
+        // HTML-escape untrusted server/scan data before it goes into innerHTML.
+        // esc() also escapes quotes for use inside attribute values.
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        function esc(s) {
+            return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
         function toggleSecret(el) {
@@ -680,7 +695,12 @@
                     }
                 } else {
                     const val = el.value.trim();
-                    if (val !== '') payload[key] = val;
+                    // Fields documented as "blank = disabled" must be sendable
+                    // as empty so the user can actually turn them off; the
+                    // server merges via update(), so a dropped blank never
+                    // cleared them. Other fields keep the drop-empty guard so a
+                    // stray blank can't zero e.g. HOME_LAT.
+                    if (val !== '' || CLEARABLE_FIELDS.includes(key)) payload[key] = val;
                 }
             }
 
@@ -768,8 +788,12 @@
                     const row = document.createElement('div');
                     row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid #222;cursor:pointer;font-size:13px';
                     if (net.active) row.style.borderLeft = '3px solid #4caf50';
+                    // escapeHtml on net.ssid \u2014 SSIDs are attacker-controllable
+                    // (broadcast in radio range) and flow from nmcli scan into
+                    // this admin page; without escaping a crafted SSID would run
+                    // script in the config UI when the user clicks Scan.
                     row.innerHTML = '<span style="font-size:14px;letter-spacing:-1px">' + signalBars(net.signal) + '</span>' +
-                        '<span style="flex:1;color:' + (net.active ? '#4caf50' : '#ffb000') + '">' + net.ssid + (net.active ? ' \u2713' : '') + '</span>' +
+                        '<span style="flex:1;color:' + (net.active ? '#4caf50' : '#ffb000') + '">' + escapeHtml(net.ssid) + (net.active ? ' \u2713' : '') + '</span>' +
                         '<span style="font-size:11px;color:#555">' + (net.security && net.security !== '--' ? '\ud83d\udd12' : '') + ' ' + net.signal + '%</span>';
                     if (!net.active) row.addEventListener('click', () => wifiSelectNetwork(net));
                     row.addEventListener('mouseover', () => { if (!net.active) row.style.background = 'rgba(255,176,0,0.05)'; });
@@ -906,18 +930,20 @@
         }
         function atcFillOutputs(outs, current) {
             const sel = document.getElementById('atc-output');
+            // esc() on server-provided names/ids — ATC_CUSTOM_FEEDS and device
+            // names are free text that reach these <option>s via innerHTML.
             sel.innerHTML = outs.map(o =>
-                `<option value="${o.id}">${o.name} [${o.type}]</option>`).join('');
+                `<option value="${esc(o.id)}">${esc(o.name)} [${esc(o.type)}]</option>`).join('');
             if (current) sel.value = current;
         }
         function atcFillStations(current) {
             const sel = document.getElementById('atc-station');
             // Nearby (distance-ordered, dead feeds hidden) first, then all.
             const nearbyOpts = _atcNearby.flatMap(ap => ap.feeds.map(f =>
-                `<option value="${f.code}">${ap.icao} ${f.label} · ${ap.dist_mi}mi — ${ap.name}</option>`));
+                `<option value="${esc(f.code)}">${esc(ap.icao)} ${esc(f.label)} · ${esc(ap.dist_mi)}mi — ${esc(ap.name)}</option>`));
             const nearbyCodes = new Set(_atcNearby.flatMap(ap => ap.feeds.map(f => f.code)));
             const allOpts = _atcStations.filter(s => !nearbyCodes.has(s.code)).map(s =>
-                `<option value="${s.code}">${s.airport} ${s.type} — ${s.name}</option>`);
+                `<option value="${esc(s.code)}">${esc(s.airport)} ${esc(s.type)} — ${esc(s.name)}</option>`);
             sel.innerHTML =
                 (nearbyOpts.length ? `<optgroup label="Nearby">${nearbyOpts.join('')}</optgroup>` : '') +
                 `<optgroup label="All stations">${allOpts.join('')}</optgroup>`;

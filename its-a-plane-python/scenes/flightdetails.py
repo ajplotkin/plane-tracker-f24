@@ -75,7 +75,11 @@ class FlightDetailsScene(object):
         show_badge = False
         if has_indicator:
             if iss_overhead:
-                phase = (count // ISS_BADGE_PHASE_FRAMES) % 2
+                # Wall-clock phase (not frame count) so the browser mirror,
+                # which blinks on floor(serverNow()/2)%2, stays in lockstep
+                # instead of drifting to arbitrary anti-phase.
+                import time as _t
+                phase = int(_t.time() // 2) % 2
                 show_badge = phase == 1
                 indicator_state = (self._data_index, len(self._data), phase)
             else:

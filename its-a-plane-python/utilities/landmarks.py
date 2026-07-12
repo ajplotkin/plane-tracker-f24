@@ -414,11 +414,14 @@ def _ensure_nominatim(lat, lon):
                  > REQUERY_AFTER_KM)
         if stale and not _nom_fetching:
             _nom_fetching = True
-            threading.Thread(
-                target=_nominatim_fetch,
-                args=(lat, lon),
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=_nominatim_fetch,
+                    args=(lat, lon),
+                    daemon=True,
+                ).start()
+            except Exception:
+                _nom_fetching = False  # start() failed (OOM) — retry next call
         return _nom_city, _nom_country
 
 

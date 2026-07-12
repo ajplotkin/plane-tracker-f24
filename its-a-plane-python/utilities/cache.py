@@ -143,9 +143,10 @@ class FR24Cache:
         """
         return self._detail_cache.get(flight_id)
 
-    def set_cached_flight_details(self, flight_id: str, details: dict) -> None:
-        """Cache flight details for a specific flight."""
-        self._detail_cache.set(flight_id, details)
+    def set_cached_flight_details(self, flight_id: str, details: dict, ttl=None) -> None:
+        """Cache flight details for a specific flight. `ttl` overrides the
+        default 30-min TTL (used to briefly negative-cache empty results)."""
+        self._detail_cache.set(flight_id, details, ttl=ttl)
 
     def should_poll_feed(self, cache_key: str) -> bool:
         """Returns True if enough time has elapsed to poll this specific feed key."""

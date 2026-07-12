@@ -61,6 +61,7 @@ except (ImportError, ModuleNotFoundError, NameError):
 # In-memory cache
 _cached_tides = None  # list of {"t": "...", "type": "H"/"L"}
 _cached_date = None   # date string "2026-05-23"
+_tide_next_retry = 0.0  # epoch; gate blocking fetches after a failure
 
 
 def _format_time(time_str):
@@ -135,7 +136,7 @@ def get_next_tides():
 
     Returns {"high": "4:52p", "low": "11:07p"} or None if no station configured.
     """
-    global _cached_tides, _cached_date
+    global _cached_tides, _cached_date, _tide_next_retry
 
     if not TIDE_STATION:
         return None
@@ -148,6 +149,13 @@ def get_next_tides():
         if _cached_tides:
             _cached_date = today
         else:
+            # This runs on the 1 Hz date-scene render thread. Without a retry
+            # gate, a NOAA outage or bad station drove a blocking HTTP fetch on
+            # EVERY frame. Gate failed fetches so we retry at most every 5 min.
+            from time import time as _now
+            if _now() < _tide_next_retry:
+                return None
+            _tide_next_retry = _now() + 300
             _cached_tides = _fetch_predictions(TIDE_STATION)
             if _cached_tides:
                 _cached_date = today
@@ -258,8 +266,15 @@ def get_water_temp():
         return None
 
     now = time()
-    if _water_temp is not None and (now - _water_temp_ts) < _WATER_TEMP_POLL:
+    # Gate network attempts on the poll interval REGARDLESS of success. This
+    # runs on the 1 Hz date-scene render thread; before, a failed fetch left
+    # _water_temp_ts unchanged (and a never-yet-successful fetch left
+    # _water_temp None), so an offline station drove a blocking HTTP request
+    # EVERY second and froze the LED. Advancing the timestamp before the
+    # attempt bounds it to one try per interval (water temp changes slowly).
+    if (now - _water_temp_ts) < _WATER_TEMP_POLL:
         return _water_temp
+    _water_temp_ts = now
 
     # Try primary station (CO-OPS)
     val = _fetch_coops_temp(WATER_TEMP_STATION)

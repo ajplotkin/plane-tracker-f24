@@ -169,8 +169,12 @@ def get_airport_coords(code):
     if not _refresh_pending:
         _refresh_pending = True
         print(f"[Airports] '{code}' not found — scheduling background refresh...")
-        t = threading.Thread(target=_background_refresh, daemon=True)
-        t.start()
+        try:
+            t = threading.Thread(target=_background_refresh, daemon=True)
+            t.start()
+        except Exception:
+            _refresh_pending = False  # start() failed (OOM) — retry next call
+            _not_found.add(code)
     else:
         _not_found.add(code)
         print(f"[Airports] '{code}' not found in database")

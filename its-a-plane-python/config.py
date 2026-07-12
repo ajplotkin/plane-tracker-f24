@@ -74,6 +74,18 @@ def _int(name: str, default: int, lo: int | None = None, hi: int | None = None) 
     return v
 
 
+def _float(name: str, default: float) -> float:
+    """Coerce a config value to float, tolerating garbage. Like _int(), this
+    runs at module import, so a blank/non-numeric lat/lon written to config.json
+    (via the /api/config POST or a hand-edit) must NOT raise — an uncaught
+    ValueError here would crash BOTH the display and the web UI at startup, with
+    no UI left to fix it. Falls back to `default`."""
+    try:
+        return float(_get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def config_source():
     """Return 'json' if JSON overlay is active, else 'env'."""
     return "json" if _json_config else "env"
@@ -105,16 +117,16 @@ def _apply():
 
     # --- Bounding box for overhead flight detection ---
     ZONE_HOME = {
-        "tl_y": float(_get("ZONE_TL_LAT", "0")),
-        "tl_x": float(_get("ZONE_TL_LON", "0")),
-        "br_y": float(_get("ZONE_BR_LAT", "0")),
-        "br_x": float(_get("ZONE_BR_LON", "0")),
+        "tl_y": _float("ZONE_TL_LAT", 0.0),
+        "tl_x": _float("ZONE_TL_LON", 0.0),
+        "br_y": _float("ZONE_BR_LAT", 0.0),
+        "br_x": _float("ZONE_BR_LON", 0.0),
     }
 
     # --- Home location (for distance calculations) ---
     LOCATION_HOME = [
-        float(_get("HOME_LAT", "0")),
-        float(_get("HOME_LON", "0")),
+        _float("HOME_LAT", 0.0),
+        _float("HOME_LON", 0.0),
     ]
 
     # --- Weather ---
