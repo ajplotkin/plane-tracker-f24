@@ -64,6 +64,9 @@ def play(volume: int = 50):
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()  # reap the SIGKILLed mpv — else returncode stays None
+                         # (kill() doesn't set it) and it lingers as a <defunct>
+                         # zombie until the next hour's Popen happens to reap it.
         if proc.returncode == 0:
             logger.info("Hourly chime: rang (volume %s, device %s)",
                         int(volume), device or "default")

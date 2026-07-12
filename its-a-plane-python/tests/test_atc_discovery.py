@@ -66,12 +66,42 @@ def test_cooldown_blocks_enqueue():
 
 
 def test_incomplete_sweep_not_cached():
-    """A 403-cooldown mid-sweep (probe returns None) must not be cached."""
+    """A 403 ban tripped mid-sweep is incomplete AND the worker must not persist
+    it (a later un-banned sweep completes it)."""
     m = _bare_manager()
 
     def fake_probe(code, timeout=2.0):
-        return None   # cooldown for everything
+        # Simulate a 403: real _probe_feed sets the global cooldown then returns
+        # None. That — not a plain timeout — is what makes a sweep incomplete.
+        m._probe_cooldown_until = time.time() + 3600
+        return None
+
+    with patch.object(m, "_probe_feed", side_effect=fake_probe), \
+            patch("utilities.atc_audio._atomic_write", lambda *a, **k: None):
+        feeds, complete = m._probe_airport_feeds("KABC")
+        assert complete is False
+
+        # The worker must NOT cache an incomplete sweep. Drive it once: reset the
+        # cooldown so it probes, the first probe re-trips it → incomplete.
+        m._probe_cooldown_until = 0.0
+        m._discover_queue = {"KABC"}
+        with patch("time.sleep", lambda *_: None):
+            m._discover_worker()
+        assert "KABC" not in m._discovered   # nothing persisted
+
+
+def test_benign_timeout_keeps_found_feed():
+    """A per-mount timeout/5xx (None, but NO cooldown) must not abort the sweep
+    or discard a live feed already found — else the airport re-enqueues every
+    tick during transient flakiness (the regression the off-lock move introduced)."""
+    m = _bare_manager()
+
+    def fake_probe(code, timeout=2.0):
+        if code == "kabc_twr":
+            return True     # tower feed is alive
+        return None         # every other mount times out — benign, no cooldown
 
     with patch.object(m, "_probe_feed", side_effect=fake_probe):
         feeds, complete = m._probe_airport_feeds("KABC")
-        assert complete is False
+        assert complete is True                  # benign None does not mark incomplete
+        assert feeds.get("twr") == "kabc_twr"    # the found feed survives
