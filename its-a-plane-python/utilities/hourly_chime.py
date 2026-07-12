@@ -53,10 +53,25 @@ def play(volume: int = 50):
             os.sched_setaffinity(proc.pid, {2})
         except Exception:
             pass
-        # Positive log so a ring is verifiable in journald (playback itself is
-        # fire-and-forget to /dev/null).
-        logger.info(f"Hourly chime: rang (volume {int(volume)}, "
-                    f"device {device or 'default'})")
+        # VERIFY it actually played — don't claim a ring just because Popen
+        # succeeded. The USB speaker is an EXCLUSIVE plughw device: if ATC (or
+        # anything) is already using it, mpv exits NON-ZERO with "Could not
+        # open/initialize audio device -> no sound" and nothing is audible.
+        # Wait for the (~2s) clip and check the exit code — deterministic,
+        # unlike a fixed-delay poll. (This is the bug that made the log say
+        # "rang" while the room was silent.)
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        if proc.returncode == 0:
+            logger.info("Hourly chime: rang (volume %s, device %s)",
+                        int(volume), device or "default")
+        else:
+            logger.warning(
+                "Hourly chime: NO SOUND — mpv exited rc=%s; the USB speaker is "
+                "busy (ATC or another stream is holding the exclusive device).",
+                proc.returncode)
     except FileNotFoundError:
         logger.warning("Hourly chime: mpv not installed — skipping")
     except Exception as e:
