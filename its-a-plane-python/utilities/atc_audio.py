@@ -866,9 +866,21 @@ class ATCAudioManager:
     def set_volume(self, vol):
         with self._lock:
             self._volume = max(0, min(100, int(vol)))
+            v = self._volume
             if self._mpv_proc:
-                self._mpv_set_volume(self._volume)
+                self._mpv_set_volume(v)
+            cast_dev = self._cast_device
             self._persist()
+        # Propagate live to a running cast session OUTSIDE the lock (it's a
+        # network command). Before, cast/airplay volume was only set once at
+        # session start, so dragging the slider mid-stream did nothing on the
+        # speaker. AirPlay is handled by its worker's 0.25s poll of self._volume
+        # (below) — no cross-thread call needed here.
+        if cast_dev is not None:
+            try:
+                cast_dev.set_volume(v / 100.0)
+            except Exception as e:
+                logger.debug(f"cast set_volume failed: {e}")
         return self.status()
 
     def select_output(self, output_id):
@@ -1414,7 +1426,18 @@ class ATCAudioManager:
                         md = None
                     task = asyncio.ensure_future(
                         atv.stream.stream_file(url, metadata=md))
+                    # Apply live volume changes: the poll loop already runs
+                    # every 0.25s, so watch self._volume and push it to the
+                    # receiver when the slider moves (was only set once above).
+                    _last_vol = float(self._volume)
                     while not stop_evt.is_set() and not task.done():
+                        cur_vol = float(self._volume)
+                        if cur_vol != _last_vol:
+                            _last_vol = cur_vol
+                            try:
+                                await atv.audio.set_volume(cur_vol)
+                            except Exception:
+                                pass
                         await asyncio.sleep(0.25)
                     if task.done() and task.exception():
                         exc = task.exception()
