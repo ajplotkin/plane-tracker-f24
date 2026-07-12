@@ -1160,7 +1160,14 @@ class ATCAudioManager:
                 try:
                     self._mpv_proc.wait(timeout=3)
                 except Exception:
+                    # terminate() didn't finish — SIGKILL, then wait() to REAP
+                    # it. Without this second wait the killed mpv lingered as a
+                    # <defunct> zombie until the next Popen happened to reap it.
                     self._mpv_proc.kill()
+                    try:
+                        self._mpv_proc.wait(timeout=2)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             self._mpv_proc = None
