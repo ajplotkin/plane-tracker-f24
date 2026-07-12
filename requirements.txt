@@ -19,3 +19,13 @@ grpcio
 # Maps, images, HTTP utilities
 Pillow
 requests
+
+# ISS pass prediction (local TLE compute — no external API)
+ephem>=4.1
+
+# ATC audio — Chromecast + AirPlay output backends.
+# Optional: imported lazily, and the ATC feature degrades to local USB/onboard
+# output when they are absent. Install them to enable casting ATC to a
+# Chromecast/Google speaker or an AirPlay receiver.
+pychromecast>=14.0
+pyatv>=0.16.0
