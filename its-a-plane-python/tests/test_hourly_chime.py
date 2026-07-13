@@ -79,11 +79,3 @@ def test_fire_once_skips_in_quiet_hours(monkeypatch):
     with patch("utilities.hourly_chime.play") as p:
         hourly_chime.fire_once()
     p.assert_not_called()
-
-
-def test_internal_scheduler_disabled_when_external_flag_set(monkeypatch):
-    monkeypatch.setenv("CHIME_EXTERNAL_SCHEDULER", "1")
-    hourly_chime._scheduler_started = False
-    with patch("utilities.hourly_chime.threading.Thread") as T:
-        hourly_chime.start_scheduler()
-    T.assert_not_called()   # no in-process thread; the systemd timer fires it

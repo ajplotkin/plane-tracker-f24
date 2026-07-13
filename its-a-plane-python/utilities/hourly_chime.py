@@ -1,12 +1,14 @@
 """
 Hourly cabin chime — plays a short "ding-dong" wav on the hour through the
-Pi's LOCAL output (USB speaker if attached, else the onboard jack).
+Pi's local speaker (USB audio card if present, else the onboard jack).
 
-A dedicated daemon thread sleeps until the top of the next hour and fires
-there (accurate to a fraction of a second — no frame-loop polling), so the
-chime lands on :00, not up to 20s late. It re-reads config each hour, so the
-enable toggle, volume, and quiet-hours window take effect on the next hour
-without a restart.
+Fired by a systemd timer (see setup/systemd/) that calls fire_once() on the
+hour. It must NOT be fired from inside the long-running tracker process: an mpv
+fork()ed from the tracker fails ALSA card enumeration ("cannot get card index"),
+even when the same command plays fine from a shell. A timer-fired chime runs in
+a clean PID1-spawned service where the device opens normally. fire_once()
+re-reads config each time, so the enable toggle, volume, and quiet-hours window
+take effect with no restart.
 
 Local-only by design: casting a 2-second sound over Chromecast/AirPlay would
 add multi-second connect latency.
@@ -15,9 +17,7 @@ import logging
 import os
 import re
 import subprocess
-import threading
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +144,6 @@ def _in_quiet_hours(start_s, end_s, now=None):
     return (a <= cur < b) if a < b else (cur >= a or cur < b)
 
 
-def _seconds_to_next_hour(now=None):
-    now = now or datetime.now()
-    nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    return max(1.0, (nxt - now).total_seconds())
-
-
 def fire_once():
     """Play the chime now if enabled and not in quiet hours. Reads config fresh.
     Never raises. This is the entry point for the EXTERNAL systemd-timer
@@ -171,35 +165,3 @@ def fire_once():
         play(getattr(cfg, "HOURLY_CHIME_VOLUME", 50))
     except Exception as e:
         logger.warning(f"Hourly chime fire error: {e}")
-
-
-def _run_scheduler():
-    while True:
-        # +0.5s margin so we always wake just PAST the boundary (never a hair
-        # before, which could double-fire).
-        time.sleep(_seconds_to_next_hour() + 0.5)
-        fire_once()
-
-
-_scheduler_started = False
-
-
-def start_scheduler():
-    """Start the hourly scheduler thread once. Safe to call repeatedly.
-
-    Skipped when CHIME_EXTERNAL_SCHEDULER is set — an external systemd timer
-    calls fire_once() instead (use it if an mpv fork()ed from this process can't
-    open the audio device; see setup/systemd/README.md). Setups without the
-    timer leave it unset and use this in-process thread.
-    """
-    global _scheduler_started
-    if os.environ.get("CHIME_EXTERNAL_SCHEDULER"):
-        logger.info("Hourly chime: internal scheduler disabled "
-                    "(CHIME_EXTERNAL_SCHEDULER set — external timer in use)")
-        return
-    if _scheduler_started:
-        return
-    _scheduler_started = True
-    threading.Thread(target=_run_scheduler, daemon=True,
-                     name="hourly-chime").start()
-    logger.info("Hourly chime scheduler started")
