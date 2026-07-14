@@ -28,10 +28,10 @@ _CHIME_FILE = os.path.join(_BASE_DIR, "data", "ding_dong.wav")
 def _usb_card_index():
     """ALSA card index (int) of the first USB-audio card, or None.
 
-    The scheduler-fired chime intermittently fails with ALSA "cannot get card
-    index for <name>" when a device is addressed by NAME (hw:CARD=UACDemoV10),
-    even though the card is present. Addressing it by INDEX (hw:1) skips that
-    name→index lookup, so we detect the index here for a fallback device.
+    The chime can fail with ALSA "cannot get card index for <name>" when a
+    device is addressed by NAME (hw:CARD=UACDemoV10), even though the card is
+    present. Addressing it by INDEX (hw:1) skips that name→index lookup, so we
+    detect the index here for a fallback device.
     """
     try:
         with open("/proc/asound/cards") as f:
@@ -55,7 +55,7 @@ def _run_mpv(args):
     the tracker's own cgroup (ruled out: env, cgroup device policy, mlockall,
     affinity). The chime is therefore fired by an EXTERNAL systemd timer
     (fire_once()), so mpv runs in a clean PID1-spawned service, not a tracker
-    fork. The in-process scheduler remains for setups without the timer.
+    fork.
 
     Uses communicate() (not wait()) so a chatty stderr can't fill the pipe and
     deadlock, and so we capture mpv's actual error on failure.
@@ -84,11 +84,10 @@ def play(volume: int = 50):
         idx = _usb_card_index()
 
         # Try device candidates best-first, and VERIFY each actually played
-        # (mpv exits non-zero when the device can't open). The scheduler-fired
-        # chime has been failing with ALSA "cannot get card index for <name>"
-        # on the muxed device, so fall back to the card BY INDEX (skips the
-        # name lookup) and finally mpv's default (onboard) — first that plays
-        # wins. This also rides out a transient device blip.
+        # (mpv exits non-zero when the device can't open). The muxed device can
+        # fail with ALSA "cannot get card index for <name>", so fall back to the
+        # card BY INDEX (skips the name lookup) and finally mpv's default
+        # (onboard) — first that plays wins. This also rides out a transient blip.
         #   1. usbmix (dmix) — mixes over ATC (keeps them muxed)
         #   2. plughw:<index> — bypasses the failing name→index lookup
         #   3. default — onboard jack, last resort
@@ -146,9 +145,8 @@ def _in_quiet_hours(start_s, end_s, now=None):
 
 def fire_once():
     """Play the chime now if enabled and not in quiet hours. Reads config fresh.
-    Never raises. This is the entry point for the EXTERNAL systemd-timer
-    scheduler (so mpv runs in a clean PID1 service, not a tracker fork) and is
-    also called by the in-process scheduler below.
+    Never raises. This is the entry point for the systemd-timer scheduler, so
+    mpv runs in a clean PID1 service, not a tracker fork.
     """
     try:
         import config as cfg
