@@ -107,6 +107,7 @@ def _apply():
     global ATC_AUTO_RESUME, ATC_QUIET_HOURS, ATC_CUSTOM_FEEDS
     global HOURLY_CHIME_ENABLED, HOURLY_CHIME_VOLUME
     global HOURLY_CHIME_QUIET_START, HOURLY_CHIME_QUIET_END
+    global AQI_ALERTS_ENABLED, AIRNOW_API_KEY, AQI_THRESHOLD
 
     # --- API Keys ---
     FR24_API_KEY = _get("FR24_API_KEY")
@@ -166,6 +167,13 @@ def _apply():
     # --- Alert toggles ---
     NWS_ALERTS_ENABLED = _bool(_get("NWS_ALERTS_ENABLED", "True"))
     ISS_ALERTS_ENABLED = _bool(_get("ISS_ALERTS_ENABLED", "True"))
+
+    # --- Air quality (EPA AirNow) — colour-coded AQI chip by the clock ---
+    # AIRNOW_API_KEY (free from airnowapi.org) is entered in the web config page.
+    # The chip shows when AQI >= AQI_THRESHOLD (0 = always show; 50 = Moderate+).
+    AQI_ALERTS_ENABLED = _bool(_get("AQI_ALERTS_ENABLED", "False"))
+    AIRNOW_API_KEY = _get("AIRNOW_API_KEY")
+    AQI_THRESHOLD = _int("AQI_THRESHOLD", 50, 0, 500)
 
     # --- Blocked callsigns (comma-separated, e.g. "N12345,N67890") ---
     _raw_blocked = _get("BLOCKED_CALLSIGNS", "")

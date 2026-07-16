@@ -9,11 +9,27 @@ try:
     from utilities.temperature import get_current_uv
 except ImportError:
     get_current_uv = lambda: None
+try:
+    from utilities.air_quality import get_aqi
+except ImportError:
+    get_aqi = lambda: None
 
 # Scene Setup
 TEMPERATURE_REFRESH_SECONDS = 600
 TEMPERATURE_FONT = fonts.extrasmall
 TEMPERATURE_FONT_HEIGHT = 5
+# EPA AQI hazardous band (#7E0023); the others reuse the palette below.
+AQI_MAROON = graphics.Color(126, 0, 35)
+
+
+def _aqi_colour(aqi):
+    """EPA AQI category colour."""
+    if aqi > 300:   return AQI_MAROON            # Hazardous
+    if aqi > 200:   return colours.PURPLE        # Very Unhealthy
+    if aqi > 150:   return colours.RED           # Unhealthy
+    if aqi > 100:   return colours.LIGHT_ORANGE  # Unhealthy for Sensitive Groups
+    if aqi > 50:    return colours.YELLOW        # Moderate
+    return colours.GREEN                         # Good
 # (Night-boundary redraws removed: adjust_brightness() acts at panel level,
 # pixel content needs no repaint.)
 
@@ -28,6 +44,7 @@ class TemperatureScene(object):
         self._cached_humidity = None
         self._redraw_temp = True
         self._last_uv_draw = None
+        self._last_aqi_draw = None
 
     def colour_gradient(self, colour_A, colour_B, ratio):
         return graphics.Color(
@@ -96,11 +113,29 @@ class TemperatureScene(object):
         uv_str = ("" if not uv_int
                   else f"UV{uv_int}" if uv_int < 10 else f"U{uv_int}")
 
+        # AQI chip: colour-coded "A<nnn>" in the gap between the time and the
+        # temp (x20-35), shown when AQI >= the configured threshold. Config read
+        # live so enabling it / entering the AirNow key takes effect at once.
+        try:
+            from config import AQI_ALERTS_ENABLED, AQI_THRESHOLD
+        except ImportError:
+            AQI_ALERTS_ENABLED, AQI_THRESHOLD = False, 50
+        aqi = None
+        if AQI_ALERTS_ENABLED:
+            try:
+                aqi = get_aqi()
+            except Exception:
+                aqi = None
+        if aqi is not None and aqi >= AQI_THRESHOLD:
+            aqi_str, aqi_colour = f"A{aqi}", _aqi_colour(aqi)
+        else:
+            aqi_str, aqi_colour = "", colours.GREEN
+
         # Draw only on change — the canvas is live (sync() discards
         # SwapOnVSync's return), so erasing+redrawing identical content
         # every second is visible flicker.
         colour_key = (temp_colour.red, temp_colour.green, temp_colour.blue,
-                      uv_str, uv_colour.red)
+                      uv_str, uv_colour.red, aqi_str, aqi_colour.red)
         if (not self._redraw_temp
                 and display_str == self._last_temperature_str
                 and colour_key == self._last_temp_colour):
@@ -145,6 +180,20 @@ class TemperatureScene(object):
             graphics.DrawText(self.canvas, TEMPERATURE_FONT, uv_x,
                               TEMPERATURE_FONT_HEIGHT, uv_colour, uv_str)
             self._last_uv_draw = (uv_str, uv_x)
+
+        # AQI chip, right-aligned to x=35 (in the gap after the time, before the
+        # temp at x=36). "A<nnn>" is 4 chars max -> starts x20, clear of the
+        # 4-5 char time (which never runs past x19).
+        if self._last_aqi_draw:
+            old_str, old_x = self._last_aqi_draw
+            graphics.DrawText(self.canvas, TEMPERATURE_FONT, old_x,
+                              TEMPERATURE_FONT_HEIGHT, colours.BLACK, old_str)
+            self._last_aqi_draw = None
+        if aqi_str:
+            aqi_x = 36 - 4 * len(aqi_str)
+            graphics.DrawText(self.canvas, TEMPERATURE_FONT, aqi_x,
+                              TEMPERATURE_FONT_HEIGHT, aqi_colour, aqi_str)
+            self._last_aqi_draw = (aqi_str, aqi_x)
 
         self._last_temperature_str = display_str
         self._last_temperature = current_temperature

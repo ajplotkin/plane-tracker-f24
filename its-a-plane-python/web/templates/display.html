@@ -362,14 +362,9 @@ function drawClock() {
 
 function drawTemp() {
     if (hasFlight()) return;
-    // E4: temperature.py: red 'ERR' when either reading is missing
-    if (state.temperature == null || state.humidity == null) {
-        text('ERR', 36, 5, C.red, XS_W);
-        return;
-    }
-    const t = Math.round(state.temperature);
-    const hum = state.humidity / 100;
-    text(t + '\u00b0', 36, 5, lerpColor(C.white, C.darkBlue, hum), XS_W);
+    // Chips first, so they still render on the temp ERR path \u2014 temperature.py
+    // draws both the UV and AQI chips regardless of the ERR state, and the
+    // mirror must show exactly what the panel shows.
     // UV chip right-aligned at x=63, EPA colours (mirrors temperature.py)
     const uv = state.uv_index;
     if (uv != null && uv > 0) {
@@ -379,6 +374,25 @@ function drawTemp() {
         const us = (u < 10 ? 'UV' : 'U') + u;  // 12px max, clears a 4-char temp
         text(us, 64 - 4 * us.length, 5, uc, XS_W);
     }
+    // AQI chip: colour-coded "A<nnn>" right-aligned to x35, in the gap between
+    // the time and the temp (mirrors temperature.py). state.aqi is already gated
+    // server-side by the enable toggle + threshold + freshness, so draw it
+    // whenever present.
+    const aqi = state.aqi;
+    if (aqi != null) {
+        const ac = aqi > 300 ? '#7e0023' : aqi > 200 ? C.purple : aqi > 150 ? C.red
+                 : aqi > 100 ? C.clockDay : aqi > 50 ? C.yellow : C.green;
+        const as = 'A' + aqi;
+        text(as, 36 - 4 * as.length, 5, ac, XS_W);
+    }
+    // E4: temperature.py: red 'ERR' when either reading is missing
+    if (state.temperature == null || state.humidity == null) {
+        text('ERR', 36, 5, C.red, XS_W);
+        return;
+    }
+    const t = Math.round(state.temperature);
+    const hum = state.humidity / 100;
+    text(t + '\u00b0', 36, 5, lerpColor(C.white, C.darkBlue, hum), XS_W);
 }
 
 function drawDate(suppressDate) {

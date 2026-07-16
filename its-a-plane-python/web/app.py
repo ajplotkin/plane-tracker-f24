@@ -525,7 +525,7 @@ def api_config_get():
     """Return current config as JSON. Masks secret values."""
     import config as cfg
 
-    SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY", "NPS_API_KEY", "OWM_API_KEY"}
+    SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY", "NPS_API_KEY", "OWM_API_KEY", "AIRNOW_API_KEY"}
 
     result = {}
     # Flat env-style keys the UI expects
@@ -546,10 +546,11 @@ def api_config_get():
         "EMAIL",
         "ATC_ENABLED", "ATC_MODE", "ATC_STATION", "ATC_VOLUME", "ATC_OUTPUT",
         "ATC_AUTO_RESUME", "ATC_QUIET_HOURS", "ATC_CUSTOM_FEEDS",
+        "AQI_ALERTS_ENABLED", "AIRNOW_API_KEY", "AQI_THRESHOLD",
     ]:
         # Return resolved booleans for checkbox fields
         if key in {"NIGHT_BRIGHTNESS", "HAT_PWM_ENABLED", "NWS_ALERTS_ENABLED", "ISS_ALERTS_ENABLED",
-                   "HOURLY_CHIME_ENABLED", "ATC_ENABLED", "ATC_AUTO_RESUME"}:
+                   "HOURLY_CHIME_ENABLED", "ATC_ENABLED", "ATC_AUTO_RESUME", "AQI_ALERTS_ENABLED"}:
             result[key] = getattr(cfg, key, False)
             continue
         val = cfg._get(key)
@@ -593,6 +594,7 @@ _VALID_CONFIG_KEYS = {
     "ATC_AUTO_RESUME", "ATC_QUIET_HOURS", "ATC_CUSTOM_FEEDS",
     "HOURLY_CHIME_ENABLED", "HOURLY_CHIME_VOLUME",
     "HOURLY_CHIME_QUIET_START", "HOURLY_CHIME_QUIET_END",
+    "AQI_ALERTS_ENABLED", "AIRNOW_API_KEY", "AQI_THRESHOLD",
 }
 
 
@@ -616,7 +618,7 @@ def api_config_post():
     # real API keys with their masks and break auth. The JS strips these too,
     # but the server must not rely on that being the only writer.
     _SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY",
-                    "NPS_API_KEY", "OWM_API_KEY"}
+                    "NPS_API_KEY", "OWM_API_KEY", "AIRNOW_API_KEY"}
     data = {k: v for k, v in data.items()
             if not (k in _SECRET_KEYS and isinstance(v, str) and "*" in v)}
     if not data:
@@ -1219,6 +1221,28 @@ def api_display_state():
     except Exception:
         uv_index = temp_vals[2] if len(temp_vals) > 2 else None
 
+    # AQI: read the value the display process already fetched+cached (don't call
+    # AirNow from the web process), gated by the same enable/threshold as the LED
+    # chip so the mirror shows it exactly when the panel does.
+    try:
+        import config as _c
+        aq = load_json(os.path.join(CACHE_DIR, "air_quality.json"), {})
+        aqi = aq.get("aqi") if isinstance(aq, dict) else None
+        ts = aq.get("ts", 0) if isinstance(aq, dict) else 0
+        key_ok = bool(getattr(_c, "AIRNOW_API_KEY", "") or "")
+        loc = getattr(_c, "LOCATION_HOME", None) or [0.0, 0.0]
+        # Mirror get_aqi()'s gate exactly: enabled + key + real location + a value
+        # still fresh (refreshed within 3h) + at/above threshold. Without the key
+        # / freshness checks the mirror would keep showing a chip the LED drops
+        # (e.g. key removed, or the display process stopped updating the cache).
+        if (not getattr(_c, "AQI_ALERTS_ENABLED", False) or not key_ok
+                or loc == [0.0, 0.0] or aqi is None
+                or (_t.time() - ts) >= 3 * 3600
+                or aqi < getattr(_c, "AQI_THRESHOLD", 50)):
+            aqi = None
+    except Exception:
+        aqi = None
+
     # --- Forecast ---
     forecast_data = load_json(os.path.join(CACHE_DIR, "forecast.json"), {})
     forecast = forecast_data.get("data", [])
@@ -1293,6 +1317,7 @@ def api_display_state():
         "temperature": temperature,
         "humidity": humidity,
         "uv_index": uv_index,
+        "aqi": aqi,                   # gated EPA AQI for the colour chip (or None)
         "forecast": forecast,
         "sunrise": sun.get("sunrise"),
         "sunset": sun.get("sunset"),
