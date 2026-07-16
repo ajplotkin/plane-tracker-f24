@@ -429,19 +429,14 @@
         </div>
     </div>
 
-    <!-- Air Quality (EPA AirNow AQI chip by the clock) -->
+    <!-- Air Quality (US EPA AQI chip by the clock — Open-Meteo, keyless) -->
     <div class="section">
         <div class="section-header" onclick="toggleSection(this)">AIR QUALITY</div>
         <div class="section-body">
             <div class="checkbox-field">
                 <input type="checkbox" id="cfg-AQI_ALERTS_ENABLED" />
                 <label for="cfg-AQI_ALERTS_ENABLED">AQI_ALERTS_ENABLED</label>
-                <span class="hint" style="margin-left:8px">Colour-coded AQI chip next to the clock (EPA AirNow)</span>
-            </div>
-            <div class="field">
-                <label>AIRNOW_API_KEY</label>
-                <input type="password" id="cfg-AIRNOW_API_KEY" placeholder="Free key from airnowapi.org" />
-                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+                <span class="hint" style="margin-left:8px">Colour-coded US EPA AQI chip next to the clock (Open-Meteo — no key needed)</span>
             </div>
             <div class="field">
                 <label>AQI_THRESHOLD</label>
@@ -630,11 +625,11 @@
             'FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY',
             'EMAIL',
             'ATC_ENABLED', 'ATC_QUIET_HOURS', 'ATC_CUSTOM_FEEDS', 'ATC_AUTO_RESUME',
-            'AQI_ALERTS_ENABLED', 'AIRNOW_API_KEY', 'AQI_THRESHOLD',
+            'AQI_ALERTS_ENABLED', 'AQI_THRESHOLD',
         ];
 
         const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME', 'AQI_ALERTS_ENABLED'];
-        const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY', 'AIRNOW_API_KEY'];
+        const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
         // Fields where an empty value is meaningful ("blank = disabled") and
         // must be sent so the user can turn them off.
         const CLEARABLE_FIELDS = ['TIDE_STATION', 'WATER_TEMP_STATION', 'AIRPORT_STATUS_LIST',

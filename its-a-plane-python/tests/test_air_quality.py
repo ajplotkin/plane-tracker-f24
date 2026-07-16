@@ -1,4 +1,4 @@
-"""AirNow AQI fetcher + the EPA colour bands for the chip.
+"""Open-Meteo AQI fetcher + the EPA colour bands for the chip.
 
 rgbmatrix is stubbed in tests/conftest.py (graphics.Color is a REAL class there,
 so the colour-band identity assertions below are meaningful).
@@ -30,15 +30,15 @@ def _reset():
         pass
 
 
-def _set_cfg(enabled=True, key="k", loc=None):
+def _set_cfg(enabled=True, loc=None):
     cfg.AQI_ALERTS_ENABLED = enabled
-    cfg.AIRNOW_API_KEY = key
     cfg.LOCATION_HOME = loc if loc is not None else [40.9, -72.3]
 
 
-def _resp(observations):
+def _resp(us_aqi):
+    """An Open-Meteo air-quality response: {"current": {"us_aqi": N}}."""
     r = MagicMock()
-    r.json.return_value = observations
+    r.json.return_value = {"current": {"us_aqi": us_aqi}}
     r.raise_for_status = lambda: None
     return r
 
@@ -50,14 +50,20 @@ def _write_cache(aqi, age_s):
 
 # ── fetcher ─────────────────────────────────────────────────────────────────
 
-def test_returns_max_aqi_across_pollutants():
+def test_returns_us_aqi_and_requests_home_coords():
     _reset(); _set_cfg()
-    obs = [{"ParameterName": "O3", "AQI": 45},
-           {"ParameterName": "PM2.5", "AQI": 152},
-           {"ParameterName": "PM10", "AQI": 60}]
-    with patch("utilities.air_quality.requests.get", return_value=_resp(obs)) as g:
-        assert air_quality.get_aqi() == 152          # max across pollutants
-        assert g.call_args.kwargs["params"]["API_KEY"] == "k"
+    with patch("utilities.air_quality.requests.get", return_value=_resp(78)) as g:
+        assert air_quality.get_aqi() == 78
+        p = g.call_args.kwargs["params"]
+        assert p["latitude"] == 40.9 and p["longitude"] == -72.3
+        assert p["current"] == "us_aqi"      # overall index (incl. PM2.5)
+        assert "API_KEY" not in p            # keyless
+
+
+def test_float_aqi_is_rounded_to_int():
+    _reset(); _set_cfg()
+    with patch("utilities.air_quality.requests.get", return_value=_resp(66.6)):
+        assert air_quality.get_aqi() == 67
 
 
 def test_disabled_makes_no_http_call():
@@ -67,21 +73,25 @@ def test_disabled_makes_no_http_call():
         g.assert_not_called()
 
 
-def test_no_key_or_no_location_makes_no_http_call():
-    _reset(); _set_cfg(key="")
-    with patch("utilities.air_quality.requests.get") as g:
-        assert air_quality.get_aqi() is None
-        g.assert_not_called()
+def test_no_location_makes_no_http_call():
     _reset(); _set_cfg(loc=[0.0, 0.0])
     with patch("utilities.air_quality.requests.get") as g:
         assert air_quality.get_aqi() is None
         g.assert_not_called()
 
 
+def test_missing_or_bad_value_keeps_none():
+    _reset(); _set_cfg()
+    r = MagicMock()
+    r.json.return_value = {"current": {}}      # no us_aqi key
+    r.raise_for_status = lambda: None
+    with patch("utilities.air_quality.requests.get", return_value=r):
+        assert air_quality.get_aqi() is None
+
+
 def test_failure_keeps_last_good_and_gates_retry():
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.get",
-               return_value=_resp([{"ParameterName": "O3", "AQI": 80}])):
+    with patch("utilities.air_quality.requests.get", return_value=_resp(80)):
         assert air_quality.get_aqi() == 80
     air_quality._cached_ts = 1.0                     # force the interval to elapse
     with patch("utilities.air_quality.requests.get",
@@ -95,8 +105,7 @@ def test_stale_value_is_hidden():
     """A value not refreshed within _MAX_AGE ages out to None (not shown wrongly
     forever while fetches keep failing)."""
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.get",
-               return_value=_resp([{"ParameterName": "O3", "AQI": 80}])):
+    with patch("utilities.air_quality.requests.get", return_value=_resp(80)):
         assert air_quality.get_aqi() == 80
     # age the last-good value past the freshness bound without a successful refresh
     air_quality._value_ts = time.time() - air_quality._MAX_AGE - 100
@@ -117,7 +126,7 @@ def test_fresh_disk_cache_is_seeded_on_cold_start():
 
 
 def test_stale_disk_cache_not_resurrected_on_cold_start():
-    """The reported bug: a restart during an outage must NOT pin an ancient AQI."""
+    """A restart during an outage must NOT pin an ancient AQI."""
     air_quality._cached_aqi = None
     air_quality._cached_ts = 0.0
     air_quality._value_ts = 0.0

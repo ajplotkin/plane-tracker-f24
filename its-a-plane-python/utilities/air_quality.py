@@ -1,13 +1,19 @@
 """
-air_quality.py — current AQI from the EPA AirNow API.
+air_quality.py — current US EPA AQI from Open-Meteo.
 
-Returns the overall US EPA Air Quality Index (0-500) for the home location —
-the max across the reporting pollutants (O3 / PM2.5 / PM10) from the nearest
-monitoring stations. Used to draw a small colour-coded "A<nnn>" chip next to the
-clock when the AQI is at/above a configurable threshold.
+Returns the overall US EPA Air Quality Index (0-500) for the home location.
+Used to draw a small colour-coded "A<nnn>" chip next to the clock when the AQI
+is at/above a configurable threshold.
 
-Free API key from https://docs.airnowapi.org/. Off unless AQI_ALERTS_ENABLED and
-AIRNOW_API_KEY are set.
+Source: Open-Meteo's air-quality API — keyless, and MODELLED (satellite +
+dispersion, blended with station data) rather than read from one physical
+monitor. That matters: the official AirNow monitor network has no PM2.5 station
+within 100 miles of many locations, and PM2.5 is what actually drives AQI (haze,
+wildfire smoke) — an AirNow lookup there returns ozone only and reads far too
+low. Open-Meteo always has a value for the exact home coordinates, and its
+`us_aqi` is already the max across the pollutant sub-indices.
+
+No API key required. Off unless AQI_ALERTS_ENABLED.
 
 Usage:
     from utilities.air_quality import get_aqi
@@ -21,10 +27,10 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://www.airnowapi.org/aq/observation/latLong/current/"
+_BASE_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cache")
 _CACHE_FILE = os.path.join(_CACHE_DIR, "air_quality.json")
-_POLL_INTERVAL = 1800  # 30 min — AirNow observations update ~hourly
+_POLL_INTERVAL = 1800  # 30 min — the hourly AQI model doesn't move faster
 _MAX_AGE = 3 * 3600    # a value not refreshed within this is stale -> not shown
 
 _cached_aqi = None   # last good AQI (int) or None
@@ -44,22 +50,21 @@ def _load_cache():
 
 
 def get_aqi():
-    """Current EPA AQI (int 0-500) for the home location, or None.
+    """Current US EPA AQI (int 0-500) for the home location, or None.
 
-    Config is read at CALL TIME (so enabling it / entering the key in the web
-    config page takes effect without a restart). Gated to one AirNow call per
-    _POLL_INTERVAL, and the timestamp is advanced BEFORE the blocking GET so an
-    unreachable AirNow / bad key can't drive a request every second on the 1 Hz
-    render thread. On failure the last good value is kept.
+    Config is read at CALL TIME (so enabling it in the web config page takes
+    effect without a restart). Gated to one call per _POLL_INTERVAL, and the
+    timestamp is advanced BEFORE the blocking GET so an unreachable API can't
+    drive a request every second on the 1 Hz render thread. On failure the last
+    good value is kept, until it ages past _MAX_AGE.
     """
     global _cached_aqi, _cached_ts, _value_ts
 
     import config as cfg
     if not getattr(cfg, "AQI_ALERTS_ENABLED", False):
         return None
-    key = getattr(cfg, "AIRNOW_API_KEY", "") or ""
     loc = getattr(cfg, "LOCATION_HOME", None) or [0.0, 0.0]
-    if not key or loc == [0.0, 0.0]:
+    if loc == [0.0, 0.0]:
         return None
 
     now = time.time()
@@ -77,19 +82,15 @@ def get_aqi():
 
     try:
         r = requests.get(_BASE_URL, params={
-            "format": "application/json",
             "latitude": loc[0],
             "longitude": loc[1],
-            "distance": 50,   # miles — nearest reporting area
-            "API_KEY": key,
+            "current": "us_aqi",
         }, timeout=(4, 8))
         r.raise_for_status()
-        obs = r.json()
-        # One entry per pollutant; the reported AQI is the max across them.
-        aqis = [o["AQI"] for o in obs
-                if isinstance(o, dict) and isinstance(o.get("AQI"), int) and o["AQI"] >= 0]
-        if aqis:
-            _cached_aqi = max(aqis)
+        val = (r.json().get("current") or {}).get("us_aqi")
+        # us_aqi is already the overall index (max across O3/PM2.5/PM10/...).
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val >= 0:
+            _cached_aqi = int(round(val))
             _value_ts = now   # mark this value fresh (last successful fetch)
             os.makedirs(_CACHE_DIR, exist_ok=True)
             import json
@@ -97,7 +98,7 @@ def get_aqi():
             with open(tmp, "w") as f:
                 json.dump({"aqi": _cached_aqi, "ts": now}, f)
             os.replace(tmp, _CACHE_FILE)
-            logger.info("[AQI] %s (AirNow)", _cached_aqi)
+            logger.info("[AQI] %s (Open-Meteo)", _cached_aqi)
     except Exception as e:
         logger.error(f"[AQI] fetch failed: {e}")
     # A value we haven't managed to refresh within _MAX_AGE is stale — hide it
