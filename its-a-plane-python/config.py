@@ -169,8 +169,9 @@ def _apply():
     ISS_ALERTS_ENABLED = _bool(_get("ISS_ALERTS_ENABLED", "True"))
 
     # --- Air quality — colour-coded US EPA AQI chip by the clock ---
-    # Keyless. Official observed AQI for your EPA reporting area (the number
-    # airnow.gov shows), with a modelled Open-Meteo fallback.
+    # Keyless. Shows the OFFICIAL observed AQI for your EPA reporting area (the
+    # number airnow.gov shows), falling back to Open-Meteo's modelled value only
+    # if that's unavailable — see utilities/air_quality.py.
     # The chip shows when AQI >= AQI_THRESHOLD (0 = always show; 50 = Moderate+).
     AQI_ALERTS_ENABLED = _bool(_get("AQI_ALERTS_ENABLED", "False"))
     AQI_THRESHOLD = _int("AQI_THRESHOLD", 50, 0, 500)

@@ -114,8 +114,8 @@ class TemperatureScene(object):
                   else f"UV{uv_int}" if uv_int < 10 else f"U{uv_int}")
 
         # AQI chip: colour-coded "A<nnn>" in the gap between the time and the
-        # temp (x20-35), shown when AQI >= the configured threshold. Config read
-        # live so enabling it / entering the AirNow key takes effect at once.
+        # temp (x20-35), shown when AQI >= the configured threshold. Keyless —
+        # see utilities/air_quality.py for the source and its fallback.
         try:
             from config import AQI_ALERTS_ENABLED, AQI_THRESHOLD
         except ImportError:

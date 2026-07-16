@@ -47,10 +47,14 @@ _STATE_FILE = os.path.join(_CACHE_DIR, "aqi_state.json")
 _POLL_INTERVAL = 1800  # 30 min — the hourly AQI doesn't move faster
 _MAX_AGE = 3 * 3600    # a value not refreshed within this is stale -> not shown
 
+_STATE_RETRY = 3600  # re-attempt a failed state lookup after this
+
 _cached_aqi = None   # last good AQI (int) or None
 _cached_ts = 0.0     # last fetch-ATTEMPT timestamp (gates the poll interval)
 _value_ts = 0.0      # when _cached_aqi was last SUCCESSFULLY fetched (freshness)
-_state = None        # 2-letter home state code, or "" once resolution has failed
+_state = ""          # resolved 2-letter home state code ("" = not resolved yet)
+_state_loc = None    # the location _state was resolved FOR (invalidates on move)
+_state_try_ts = 0.0  # last state-lookup attempt (backs off after a failure)
 
 
 def _load_cache():
@@ -65,46 +69,60 @@ def _load_cache():
 
 
 def _home_state(loc):
-    """2-letter state code for the home location, or "" if unresolvable.
+    """2-letter state code for `loc`, or "" if not resolved (yet).
 
-    Reverse-geocoded once and cached to disk — the home location doesn't move,
-    so this is a one-time cost. Nominatim asks callers to be light on it; we
-    hit it at most once per install.
+    Reverse-geocoded once and cached to disk — home doesn't move, so this is a
+    one-time cost and Nominatim (which asks callers to be light on it) sees at
+    most one request per install.
+
+    Only a SUCCESSFUL resolution is memoised or persisted. A failure — no
+    network at boot, or a 200 with no state in it — must stay retryable: caching
+    "" would silently pin the device to the fallback source forever. Retries are
+    backed off to _STATE_RETRY so a permanently unresolvable location (e.g.
+    outside the US) can't trickle requests at Nominatim.
     """
-    global _state
-    if _state is not None:
+    global _state, _state_loc, _state_try_ts
+    if _state and _state_loc == loc:
         return _state
     import json
-    try:                                  # disk cache (survives restarts)
+    try:                                  # disk cache (successes only)
         with open(_STATE_FILE) as f:
             d = json.load(f)
-        if d.get("lat") == loc[0] and d.get("lon") == loc[1]:
-            _state = d.get("state", "") or ""
+        if d.get("lat") == loc[0] and d.get("lon") == loc[1] and d.get("state"):
+            _state, _state_loc = d["state"], list(loc)
             return _state
     except Exception:
         pass
-    _state = ""
+
+    now = time.time()
+    if (now - _state_try_ts) < _STATE_RETRY:
+        return ""                         # recently failed — don't hammer
+    _state_try_ts = now
     try:
-        # zoom=10 (locality) rather than 5 (state): border locations like a town
-        # right across a river resolve to the correct state, and the response
-        # still carries the state ISO code.
+        # zoom=10 (locality) rather than 5 (state): border locations — a town
+        # right across a river from another state — resolve correctly, and the
+        # response still carries the state ISO code.
         r = requests.get(_NOMINATIM_URL, params={
             "lat": loc[0], "lon": loc[1], "format": "json", "zoom": 10,
         }, headers={"User-Agent": _UA}, timeout=(4, 8))
         r.raise_for_status()
         addr = (r.json() or {}).get("address") or {}
         iso = addr.get("ISO3166-2-lvl4", "")   # e.g. "US-NY"
-        if iso and "-" in iso:
-            _state = iso.split("-")[-1]
+        if not (iso and "-" in iso):
+            logger.error("[AQI] no state in geocode response; will retry")
+            return ""
+        st = iso.split("-")[-1]
+        _state, _state_loc = st, list(loc)
         os.makedirs(_CACHE_DIR, exist_ok=True)
         tmp = f"{_STATE_FILE}.tmp.{os.getpid()}"
         with open(tmp, "w") as f:
-            json.dump({"lat": loc[0], "lon": loc[1], "state": _state}, f)
+            json.dump({"lat": loc[0], "lon": loc[1], "state": st}, f)
         os.replace(tmp, _STATE_FILE)
-        logger.info("[AQI] home state resolved: %s", _state or "(unknown)")
+        logger.info("[AQI] home state resolved: %s", st)
+        return st
     except Exception as e:
-        logger.error(f"[AQI] state lookup failed: {e}")
-    return _state
+        logger.error(f"[AQI] state lookup failed (will retry): {e}")
+    return ""
 
 
 def _fetch_airnow(loc, state):
