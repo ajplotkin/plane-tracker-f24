@@ -125,7 +125,7 @@ class FlightDetailsScene(object):
         callsign = self._data[self._data_index]["callsign"]
         owner_icao = self._data[self._data_index]["owner_icao"]
 
-        if callsign and callsign != "N/A":
+        if callsign and callsign not in ("N/A", "UNKNOWN"):
             if owner_icao and callsign.startswith(owner_icao):
                 flight_no = callsign[len(owner_icao):]
             else:

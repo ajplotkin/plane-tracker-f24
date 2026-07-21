@@ -36,6 +36,9 @@ class JourneyScene(object):
     def __init__(self):
         super().__init__()
         self._last_debug_print = None
+        # Arrow x is recomputed each frame in journey() from the origin text
+        # width; default matches the old fixed position until journey() runs.
+        self._journey_arrow_point_x = ARROW_POINT_POSITION[0]
 
     @Animator.KeyFrame.add(0)
     def journey(self):
@@ -121,6 +124,10 @@ class JourneyScene(object):
             origin if origin else JOURNEY_BLANK_FILLER,
         )
 
+        # Arrow sits just after the origin text. It used to be hard-fixed at
+        # x42, which a 4+ char code (or a junk string) overran — see review.
+        self._journey_arrow_point_x = JOURNEY_POSITION[0] + text_length + ARROW_WIDTH
+
         _ = graphics.DrawText(
             self.canvas,
             JOURNEY_FONT_SELECTED if destination == JOURNEY_CODE_SELECTED else JOURNEY_FONT,
@@ -137,8 +144,12 @@ class JourneyScene(object):
         distance_origin_text_width = len(distance_origin_text) * font_character_width
         distance_destination_text_width = len(distance_destination_text) * font_character_width
 
-        distance_origin_x = center_x - half_width + (half_width - distance_origin_text_width) // 2
-        distance_destination_x = center_x + (half_width - distance_destination_text_width) // 2
+        # Clamp so a wide (5-digit KM) distance can't back into the logo
+        # column (x<17) or cross the panel centre into the other half.
+        distance_origin_x = max(JOURNEY_POSITION[0],
+                                center_x - half_width + (half_width - distance_origin_text_width) // 2)
+        distance_destination_x = max(center_x,
+                                     center_x + (half_width - distance_destination_text_width) // 2)
 
         distance_origin_text_length = 0
         for ch in distance_origin_text:
@@ -170,14 +181,14 @@ class JourneyScene(object):
             return
 
         self.draw_square(
-            ARROW_POINT_POSITION[0] - ARROW_WIDTH,
+            self._journey_arrow_point_x - ARROW_WIDTH,
             ARROW_POINT_POSITION[1] - (ARROW_HEIGHT // 2),
-            ARROW_POINT_POSITION[0],
+            self._journey_arrow_point_x,
             ARROW_POINT_POSITION[1] + (ARROW_HEIGHT // 2),
             colours.BLACK,
         )
 
-        x = ARROW_POINT_POSITION[0] - ARROW_WIDTH + 1
+        x = self._journey_arrow_point_x - ARROW_WIDTH + 1
         y1 = ARROW_POINT_POSITION[1] - (ARROW_HEIGHT // 2)
         y2 = ARROW_POINT_POSITION[1] + (ARROW_HEIGHT // 2)
 

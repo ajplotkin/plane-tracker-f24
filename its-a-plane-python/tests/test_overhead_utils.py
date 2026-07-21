@@ -51,11 +51,14 @@ class TestHaversine:
 
     def test_known_distance_new_york_los_angeles(self):
         """NY to LA is approximately 2,451 miles."""
-        from utilities.overhead import haversine
-        # JFK to LAX approximate coordinates
-        dist = haversine(40.6413, -73.7781, 33.9425, -118.4081)
-        # Should be roughly 2,450 miles (imperial)
-        assert 2400 < dist < 2500
+        from unittest.mock import patch
+        import utilities.overhead as _oh
+        # haversine returns miles unless DISTANCE_UNITS=="metric", and that value
+        # is bound at overhead's module-load time — so pin it here rather than
+        # depend on whatever config another test's import happened to bind first.
+        with patch.object(_oh, "DISTANCE_UNITS", "imperial"):
+            dist = _oh.haversine(40.6413, -73.7781, 33.9425, -118.4081)
+        assert 2400 < dist < 2500   # miles
 
     def test_none_lat1_returns_zero(self):
         """None latitude returns 0 (guard against invalid data)."""
@@ -723,3 +726,20 @@ class TestAlertOverflowClipping:
         date_position_x = 36
         clear_start = max(alert_end_x, date_position_x)
         assert clear_start == 40  # alert end is past date start
+
+
+def test_clean_code_maps_junk_route_strings_to_empty():
+    """Route sources hand back junk ('UNKNOWN', names, 'N/A') for route-less
+    aircraft. It must not reach the journey scene (which draws it verbatim and
+    collides with the arrow); map non-code shapes to '' -> the ' ? ' filler."""
+    from utilities.overhead import _clean_code
+    assert _clean_code("EWR") == "EWR"
+    assert _clean_code("KJFK") == "KJFK"
+    assert _clean_code("ewr") == "EWR"          # normalised to upper
+    assert _clean_code("UNKNOWN") == ""         # the photographed bug's trigger
+    assert _clean_code("N/A") == ""
+    assert _clean_code("Newark Liberty") == ""  # a full name
+    assert _clean_code("") == ""
+    assert _clean_code(None) == ""
+    assert _clean_code("AB") == ""              # too short for a code
+    assert _clean_code("ABCDE") == ""           # too long

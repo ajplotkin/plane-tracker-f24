@@ -2,6 +2,7 @@ import os
 import json
 import math
 import logging
+import re
 import requests
 from time import time
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,24 @@ from utilities.fr24_client import FR24Client
 from httpx import ConnectError, TimeoutException
 
 logger = logging.getLogger(__name__)
+
+
+_VALID_CODE = re.compile(r"^[A-Z0-9]{3,4}$")
+
+
+def _clean_code(s):
+    """An airport code (3-4 alphanumerics) or "".
+
+    Route sources — the fr24 gRPC feed especially — hand back junk for a
+    route-less aircraft (the literal "UNKNOWN", a full airport name, "N/A") with
+    no shape check. The journey scene draws origin/destination verbatim at a
+    fixed x, so a long string collides with the fixed arrow and pushes the
+    destination off the 64px panel. Map anything that isn't a short code to ""
+    so the scene shows its " ? " filler and the FlightStats route fallback
+    (gated on an empty origin) can still run.
+    """
+    s = (s or "").strip().upper()
+    return s if _VALID_CODE.match(s) else ""
 
 from config import (
     DISTANCE_UNITS,
@@ -872,8 +891,8 @@ class Overhead:
                                 if airline_name == airline_name.upper():
                                     airline_name = airline_name.title()
 
-                        origin = f.origin_airport_iata or ""
-                        destination = f.destination_airport_iata or ""
+                        origin = _clean_code(f.origin_airport_iata)
+                        destination = _clean_code(f.destination_airport_iata)
 
                         # Heliport origin/destination is definitive: nothing
                         # fixed-wing operates from JRA/JRB/TSS.
@@ -1093,8 +1112,8 @@ class Overhead:
                                     "airline_name": cached_route.get("airline_name", ""),
                                     "is_live": False,
                                     "is_scheduled": True,
-                                    "origin": cached_route.get("origin", ""),
-                                    "destination": cached_route.get("destination", ""),
+                                    "origin": _clean_code(cached_route.get("origin", "")),
+                                    "destination": _clean_code(cached_route.get("destination", "")),
                                     "dep_time": cached_route.get("dep_time", ""),
                                     "arr_time": cached_route.get("arr_time", ""),
                                     "schedule_status": "scheduled",
@@ -1354,8 +1373,8 @@ class Overhead:
                                 "is_live": False,
                                 "is_scheduled": True,
                                 "not_trackable": _dep_passed and self._tracked_miss_count > 20,
-                                "origin": sched.get("origin", ""),
-                                "destination": sched.get("destination", ""),
+                                "origin": _clean_code(sched.get("origin", "")),
+                                "destination": _clean_code(sched.get("destination", "")),
                                 "dep_time": sched.get("dep_time", ""),
                                 "arr_time": sched.get("arr_time", ""),
                                 "schedule_status": sched.get("status", ""),
@@ -1544,8 +1563,8 @@ class Overhead:
                         sched = self._tracked_schedule_cache[k]
                         break
                 if sched:
-                    origin = sched.get("origin", "")
-                    dest = sched.get("destination", "")
+                    origin = _clean_code(sched.get("origin", ""))
+                    dest = _clean_code(sched.get("destination", ""))
                     cs_airline = sched.get("cs_airline_iata", "")  # e.g., YX (Republic)
                     # Convert operating carrier IATA to ICAO prefix for callsign matching
                     cs_icao = IATA_TO_ICAO.get(cs_airline, "")
@@ -1619,8 +1638,8 @@ class Overhead:
             eta = fp.get("eta", 0) or 0
 
             # Look up airport coordinates from local database for distance calculations
-            origin_code = match.origin_airport_iata or ""
-            dest_code = match.destination_airport_iata or ""
+            origin_code = _clean_code(match.origin_airport_iata)
+            dest_code = _clean_code(match.destination_airport_iata)
             dest_coords = _airport_coords(dest_code)
             origin_coords = _airport_coords(origin_code)
 
@@ -1717,8 +1736,8 @@ class Overhead:
                 "number": match.number or flight_input,
                 "airline_name": airline_name,
                 "is_live": True,
-                "origin": match.origin_airport_iata or "",
-                "destination": match.destination_airport_iata or "",
+                "origin": _clean_code(match.origin_airport_iata),
+                "destination": _clean_code(match.destination_airport_iata),
                 "dest_lat": dest_lat or 0,
                 "dest_lon": dest_lon or 0,
                 "aircraft_type": match.aircraft_code or "",
