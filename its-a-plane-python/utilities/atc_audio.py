@@ -216,8 +216,9 @@ class ATCAudioManager:
         self._auto_resume = True
         self._refresh_config()
 
-        # If we were playing a Pi-side output on restart, honour auto-resume.
-        if self._auto_resume and self._playing and self._pi_side(self._output):
+        # If we were playing a Pi-side output on restart, honour auto-resume —
+        # but not at volume 0 (a muted stream shouldn't resume streaming).
+        if self._auto_resume and self._playing and self._volume > 0 and self._pi_side(self._output):
             # Defer actual spawn to first tick() so imports settle.
             self._resume_pending = True
         else:
@@ -876,11 +877,36 @@ class ATCAudioManager:
 
     def set_volume(self, vol):
         with self._lock:
+            prev = self._volume
             self._volume = max(0, min(100, int(vol)))
             v = self._volume
-            if self._mpv_proc:
-                self._mpv_set_volume(v)
             cast_dev = self._cast_device
+            if v == 0:
+                # Muting to 0 == off: tear the backend down so we don't keep
+                # streaming silently (wasted bandwidth, and a "playing" that
+                # read as on in HomeKit). The mode is kept, so raising the
+                # volume resumes.
+                if self._playing:
+                    if self._pi_side(self._output):
+                        self._stop_backend_locked()
+                    self._playing = False
+                    cast_dev = None
+            elif self._playing:
+                if self._mpv_proc:
+                    self._mpv_set_volume(v)   # live volume change
+            elif prev == 0 and self._mode != "off" and self._enabled:
+                # Un-muting from 0 is an explicit "play" gesture — resume. Gated
+                # exactly like start(): ONLY a true 0->N unmute (not an ordinary
+                # volume nudge while stopped for quiet/disabled reasons — which
+                # would start audio the auto-tick then kills ~5s later, per
+                # review), only when the feature is enabled, and — like start() —
+                # treat it as a quiet-hours override so the tick doesn't stop it.
+                self._playing = True
+                if self._in_quiet_hours():
+                    self._quiet_override = True
+                if self._pi_side(self._output):
+                    self._start_backend_locked()
+                cast_dev = self._cast_device
             self._persist()
         # Propagate live to a running cast session OUTSIDE the lock (it's a
         # network command). Before, cast/airplay volume was only set once at
@@ -939,6 +965,8 @@ class ATCAudioManager:
                 else:
                     self._mode = "manual" if self._station else "auto"
             self._ensure_station_locked()
+            if self._volume == 0:
+                self._volume = 10   # an explicit "on" must not start silent
             self._playing = True
             self._airplay_needs_pairing = ""   # explicit gesture — allow a retry
             self._airplay_failed = ""
@@ -1089,8 +1117,9 @@ class ATCAudioManager:
                             self._stop_backend_locked()
                             self._start_backend_locked()
                 # Arm playback only when there is actually a station — no
-                # point reporting "playing" silence when nothing resolved.
-                if self._station and not self._playing:
+                # point reporting "playing" silence when nothing resolved — and
+                # not while muted (volume 0), which means the user turned it off.
+                if self._station and not self._playing and self._volume > 0:
                     self._playing = True
                     if self._pi_side(self._output):
                         self._start_backend_locked()
