@@ -630,11 +630,14 @@
 
         const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME', 'AQI_ALERTS_ENABLED'];
         const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
-        // Fields where an empty value is meaningful ("blank = disabled") and
-        // must be sent so the user can turn them off.
+        // Fields where an empty value is meaningful ("blank = disabled", or
+        // "blank = fall back to the default") and must be sent so the user can
+        // actually clear them. Without this, a non-clearable field is dropped
+        // when blank and the server merge keeps its old value — so a stray value
+        // (e.g. JOURNEY_BLANK_FILLER="Unknown") can never be removed via the UI.
         const CLEARABLE_FIELDS = ['TIDE_STATION', 'WATER_TEMP_STATION', 'AIRPORT_STATUS_LIST',
             'BLOCKED_CALLSIGNS', 'ATC_CUSTOM_FEEDS', 'ATC_QUIET_HOURS',
-            'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END'];
+            'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END', 'JOURNEY_BLANK_FILLER'];
 
         function toggleSection(header) {
             header.parentElement.classList.toggle('collapsed');
