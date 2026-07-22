@@ -45,7 +45,8 @@ def _clean_airline(name):
     _clean_code drops junk route codes — so the owner-lookup fallback still
     runs and the panel never shows the word "Unknown" as an airline.
     """
-    return "" if (name or "").strip().lower() in _JUNK_AIRLINE else name
+    name = (name or "").strip()
+    return "" if name.lower() in _JUNK_AIRLINE else name
 
 from config import (
     DISTANCE_UNITS,
@@ -233,7 +234,6 @@ def _atomic_dump(path: str, data):
     This is the highest-frequency cross-process file (current_overhead.json,
     flight_counter.json, close/farthest.txt) — a plain open('w') truncates to
     0 bytes first, which is exactly the torn read the readers were hitting."""
-    d = os.path.dirname(path) or "."
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
@@ -925,8 +925,8 @@ class Overhead:
                                 from utilities.flightstats import get_route
                                 fs = get_route(callsign)
                                 if fs:
-                                    origin = fs.get("origin", "")
-                                    destination = fs.get("destination", "")
+                                    origin = _clean_code(fs.get("origin", ""))
+                                    destination = _clean_code(fs.get("destination", ""))
                                     if origin or destination:
                                         route_source = "flightstats"
                                         if fs.get("aircraft") and not plane:
@@ -1731,7 +1731,7 @@ class Overhead:
             time_est_arr   = self.safe_get(time_details, "estimated", "arrival") or eta or None
 
             # Airline name: try local database, then FR24
-            airline_name = match.airline_name or ""
+            airline_name = _clean_airline(match.airline_name or "")
             if not airline_name:
                 airline_icao_code = match.airline_icao or ""
                 airline_name = _airline_name_lookup(airline_icao_code)
@@ -1741,10 +1741,9 @@ class Overhead:
                     and match.registration.startswith("N")
                     and match.registration[1:2].isdigit()):
                 ac_info = _adsbdb_aircraft(match.registration)
-                if ac_info.get("owner"):
-                    airline_name = ac_info["owner"]
-                    if airline_name == airline_name.upper():
-                        airline_name = airline_name.title()
+                owner = _clean_airline(ac_info.get("owner", ""))
+                if owner:
+                    airline_name = owner.title() if owner == owner.upper() else owner
 
             return {
                 "callsign": flight_input,
