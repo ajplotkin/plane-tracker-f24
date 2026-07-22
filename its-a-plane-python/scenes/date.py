@@ -15,6 +15,25 @@ TIDE_LOW_COLOUR = graphics.Color(66, 164, 244)      # Light blue
 WATER_TEMP_COLOUR = graphics.Color(0, 200, 150)    # Teal
 WATER_TEMP_FALLBACK_COLOUR = graphics.Color(100, 160, 200)  # Blue-grey (fallback indicator)
 
+# Sea-temp icon (6px wide, 5px tall), drawn left of the number in the x36-63
+# rotation slot in place of the "Sea " text label — the label left no room for a
+# space, so a coastal reading ran together with the number.
+SEA_ICON = ("......", ".##..#", "#..##.", ".##..#", "#..##.")   # double wave
+ICON_WIDTH = 6
+ICON_Y_TOP = 6                                        # aligns with 4x6 digits (y6-10)
+ICON_NUMBER_X = DATE_POSITION[0] + ICON_WIDTH + 2     # 36 + 6 + 2 = 44
+_ICON_TYPES = {"water": SEA_ICON, "water_fb": SEA_ICON}
+
+
+def _draw_water_icon(canvas, icon, colour):
+    """Draw a 6x5 water-temp icon at x36 (rows ICON_Y_TOP..+4)."""
+    x0 = DATE_POSITION[0]
+    for r, row in enumerate(icon):
+        for c, ch in enumerate(row):
+            if ch == "#":
+                canvas.SetPixel(x0 + c, ICON_Y_TOP + r,
+                                colour.red, colour.green, colour.blue)
+
 # Cycle timing: 5 seconds per item (called once per second)
 _CYCLE_SECONDS = 5
 
@@ -30,6 +49,7 @@ class DateScene(object):
         self._date_suppressed = False
         self._cached_tides = None
         self._tide_fetch_date = None
+        self._last_item_type = None  # drives icon-aware clearing
 
 
     def moonphase(self):
@@ -159,7 +179,8 @@ class DateScene(object):
                 wt = get_water_temp()
                 if wt:
                     wtype = "water_fb" if is_water_temp_fallback() else "water"
-                    items.append((wtype, f"Sea {wt}\xb0"))
+                    # Number only; the SEA_ICON is drawn to its left in date().
+                    items.append((wtype, f"{wt}\xb0"))
             except Exception:
                 pass
 
@@ -187,41 +208,37 @@ class DateScene(object):
         else:
             start_color, end_color = self.map_moon_phase_to_color(moon_phase_value)
 
-        # Clear previous text if it changed
-        if self._last_display_text and self._last_display_text != display_text:
-            graphics.DrawText(
-                self.canvas,
-                DATE_FONT,
-                DATE_POSITION[0],
-                DATE_POSITION[1],
-                colours.BLACK,
-                self._last_display_text,
-            )
-
-        # Also clear on scene re-entry
-        if getattr(self, "_redraw_date", False) and self._last_display_text:
-            graphics.DrawText(
-                self.canvas,
-                DATE_FONT,
-                DATE_POSITION[0],
-                DATE_POSITION[1],
-                colours.BLACK,
-                self._last_display_text,
-            )
+        # Clear the previous item. Sea items draw an icon at x36 plus the number
+        # shifted to ICON_NUMBER_X, so a black text-redraw at x36 would leave the
+        # icon and shifted number lit — clear the whole slot instead.
+        needs_clear = (
+            (self._last_display_text and self._last_display_text != display_text)
+            or (getattr(self, "_redraw_date", False) and self._last_display_text)
+        )
+        if needs_clear:
+            if self._last_item_type in _ICON_TYPES:
+                self.draw_square(DATE_POSITION[0], ICON_Y_TOP, 64, 11, colours.BLACK)
+            else:
+                graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0],
+                                  DATE_POSITION[1], colours.BLACK, self._last_display_text)
 
         self._last_display_text = display_text
         self._last_date = current_date
+        self._last_item_type = item_type
 
-        # Draw with appropriate color
-        if item_type == "date":
+        # Draw with appropriate colour. Sea items draw an icon at x36 and the
+        # number at ICON_NUMBER_X; everything else is plain text at x36.
+        if item_type in _ICON_TYPES:
+            icon_colour = (WATER_TEMP_FALLBACK_COLOUR if item_type == "water_fb"
+                           else WATER_TEMP_COLOUR)
+            _draw_water_icon(self.canvas, _ICON_TYPES[item_type], icon_colour)
+            graphics.DrawText(self.canvas, DATE_FONT, ICON_NUMBER_X,
+                              DATE_POSITION[1], icon_colour, display_text)
+        elif item_type == "date":
             self.draw_gradient_text(display_text, DATE_POSITION[0], DATE_POSITION[1], start_color, end_color)
         elif item_type == "high":
             graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0], DATE_POSITION[1], TIDE_HIGH_COLOUR, display_text)
         elif item_type == "low":
             graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0], DATE_POSITION[1], TIDE_LOW_COLOUR, display_text)
-        elif item_type == "water":
-            graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0], DATE_POSITION[1], WATER_TEMP_COLOUR, display_text)
-        elif item_type == "water_fb":
-            graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0], DATE_POSITION[1], WATER_TEMP_FALLBACK_COLOUR, display_text)
 
         self._redraw_date = False

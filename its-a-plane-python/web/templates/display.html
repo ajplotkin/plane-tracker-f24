@@ -182,6 +182,10 @@ const COLS = 64, ROWS = 32, FPS = 15, POLL_MS = 1000;
 // Font metrics: extrasmall=4x6, small=5x8 (width x height)
 const XS_W = 4, XS_H = 6, SM_W = 5, SM_H = 8;
 
+// Water-temp rotation icons (must match scenes/date.py SEA_ICON / POOL_ICON)
+const SEA_ICON = ['......', '.##..#', '#..##.', '.##..#', '#..##.'];   // double wave
+const POOL_ICON = ['#....#', '######', '#....#', '######', '.####.'];  // ladder
+
 // All hex values verified against setup/colours.py
 const C = {
     bg:'#030302',
@@ -461,6 +465,15 @@ function drawDate(suppressDate) {
             const charColor = lerpColor(startC, endC, pos);
             text(txt[i], 36 + i * XS_W, 11, charColor, XS_W);
         }
+    } else if (item.type === 'water' || item.type === 'water_fb' || item.type === 'pool') {
+        // Sea/pool: draw the 6x5 icon at x36, number at x44 (matches date.py).
+        const col = colorMap[item.type] || C.grey;
+        const icon = (item.type === 'pool') ? POOL_ICON : SEA_ICON;
+        ctx.fillStyle = col;
+        for (let r = 0; r < icon.length; r++)
+            for (let c = 0; c < icon[r].length; c++)
+                if (icon[r][c] === '#') ctx.fillRect((36 + c) * S, (6 + r) * S, S, S);
+        text(item.text, 44, 11, col, XS_W);
     } else {
         text(item.text, 36, 11, colorMap[item.type] || C.grey, XS_W);
     }
