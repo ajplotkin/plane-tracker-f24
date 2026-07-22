@@ -31,6 +31,22 @@ def _clean_code(s):
     s = (s or "").strip().upper()
     return s if _VALID_CODE.match(s) else ""
 
+
+_JUNK_AIRLINE = {"", "unknown", "n/a", "na", "none", "null"}
+
+
+def _clean_airline(name):
+    """An airline / owner display name, or "" for a junk placeholder.
+
+    FR24's gRPC feed hands back the literal string "Unknown" (its own mixed
+    casing) as registered_owners for aircraft it has no owner record for, and
+    adsbdb can return "UNKNOWN". Either would otherwise render verbatim as the
+    airline on the flight display. Map such placeholders to "" — the same way
+    _clean_code drops junk route codes — so the owner-lookup fallback still
+    runs and the panel never shows the word "Unknown" as an airline.
+    """
+    return "" if (name or "").strip().lower() in _JUNK_AIRLINE else name
+
 from config import (
     DISTANCE_UNITS,
     MAX_FARTHEST,
@@ -842,7 +858,7 @@ class Overhead:
 
                         # Airline name: try local database first, then FR24's registered_owners
                         flight_number = self.safe_get(d, "schedule_info", "flight_number", default="")
-                        airline_name = self.safe_get(d, "aircraft_info", "registered_owners", default="")
+                        airline_name = _clean_airline(self.safe_get(d, "aircraft_info", "registered_owners", default=""))
 
                         # Determine airline ICAO from callsign prefix
                         owner_icao = f.airline_icao or ""
@@ -886,10 +902,9 @@ class Overhead:
                                 and f.registration[1:2].isdigit()):
                             stats["adsbdb_lookups"] += 1
                             ac_info = _adsbdb_aircraft(f.registration)
-                            if ac_info.get("owner"):
-                                airline_name = ac_info["owner"]
-                                if airline_name == airline_name.upper():
-                                    airline_name = airline_name.title()
+                            owner = _clean_airline(ac_info.get("owner", ""))
+                            if owner:
+                                airline_name = owner.title() if owner == owner.upper() else owner
 
                         origin = _clean_code(f.origin_airport_iata)
                         destination = _clean_code(f.destination_airport_iata)

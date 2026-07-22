@@ -743,3 +743,24 @@ def test_clean_code_maps_junk_route_strings_to_empty():
     assert _clean_code(None) == ""
     assert _clean_code("AB") == ""              # too short for a code
     assert _clean_code("ABCDE") == ""           # too long
+
+
+def test_clean_airline_maps_unknown_placeholders_to_empty():
+    """FR24 gRPC returns the literal 'Unknown' (its own casing) as
+    registered_owners for aircraft with no owner record; adsbdb can return
+    'UNKNOWN'. Either would render verbatim as the airline on the flight
+    display. Map the placeholders to '' so the owner-lookup fallback runs and
+    'Unknown' never shows as an airline — while real names pass through intact."""
+    from utilities.overhead import _clean_airline
+    # placeholders -> "" (case/whitespace-insensitive)
+    assert _clean_airline("Unknown") == ""          # the photographed bug's trigger
+    assert _clean_airline("UNKNOWN") == ""
+    assert _clean_airline(" unknown ") == ""
+    assert _clean_airline("N/A") == ""
+    assert _clean_airline("None") == ""
+    assert _clean_airline("") == ""
+    assert _clean_airline(None) == ""
+    # real names pass through unchanged (incl. ones that merely contain the substring)
+    assert _clean_airline("NetJets") == "NetJets"
+    assert _clean_airline("Private owner") == "Private owner"
+    assert _clean_airline("Unknown Air Ltd") == "Unknown Air Ltd"  # whole-string match only
