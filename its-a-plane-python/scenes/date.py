@@ -136,6 +136,17 @@ class DateScene(object):
             self._cached_tides = None
         return self._cached_tides
 
+    def _slot_needs_clear(self, item_type, display_text):
+        """Whether to clear the x36-63 slot before drawing. Clears on a text OR
+        item-type change (two icon types can share a display string) and on a
+        forced scene re-entry (_redraw_date)."""
+        if not self._last_display_text:
+            return False
+        if getattr(self, "_redraw_date", False):
+            return True
+        return (self._last_display_text != display_text
+                or self._last_item_type != item_type)
+
     @Animator.KeyFrame.add(frames.PER_SECOND * 1)
     def date(self, count):
         if getattr(self, '_iss_active', False):
@@ -225,10 +236,7 @@ class DateScene(object):
         # Clear the previous item. Sea items draw an icon at x36 plus the number
         # shifted to ICON_NUMBER_X, so a black text-redraw at x36 would leave the
         # icon and shifted number lit — clear the whole slot instead.
-        needs_clear = (
-            (self._last_display_text and self._last_display_text != display_text)
-            or (getattr(self, "_redraw_date", False) and self._last_display_text)
-        )
+        needs_clear = self._slot_needs_clear(item_type, display_text)
         if needs_clear:
             if self._last_item_type in _ICON_TYPES:
                 self.draw_square(DATE_POSITION[0], ICON_Y_TOP, 64, 11, colours.BLACK)
