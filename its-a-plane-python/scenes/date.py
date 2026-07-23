@@ -19,14 +19,27 @@ WATER_TEMP_FALLBACK_COLOUR = graphics.Color(100, 160, 200)  # Blue-grey (fallbac
 # rotation slot in place of the "Sea " text label — the label left no room for a
 # space, so a coastal reading ran together with the number.
 SEA_ICON = ("......", ".##..#", "#..##.", ".##..#", "#..##.")   # double wave
-ICON_WIDTH = 6
+TIDE_UP_ICON = (".#..", "###.", ".#..", ".#..", ".#..")         # high tide (rising)
+TIDE_DOWN_ICON = (".#..", ".#..", ".#..", "###.", ".#..")       # low tide (falling)
+ICON_WIDTH = 6                                        # water icon width
 ICON_Y_TOP = 6                                        # aligns with 4x6 digits (y6-10)
-ICON_NUMBER_X = DATE_POSITION[0] + ICON_WIDTH + 2     # 36 + 6 + 2 = 44
-_ICON_TYPES = {"water": SEA_ICON, "water_fb": SEA_ICON}
+ICON_NUMBER_X = DATE_POSITION[0] + ICON_WIDTH + 2     # 36 + 6 + 2 = 44 (water)
+# type -> (icon, x where the number/time starts). 6px water leaves a 2px gap (x44);
+# the 4px tide arrows sit flush at x40 so the full "11:07p" time still fits.
+_ICON_TYPES = {
+    "water":    (SEA_ICON, ICON_NUMBER_X),
+    "water_fb": (SEA_ICON, ICON_NUMBER_X),
+    "high":     (TIDE_UP_ICON, DATE_POSITION[0] + 4),
+    "low":      (TIDE_DOWN_ICON, DATE_POSITION[0] + 4),
+}
+_ICON_COLOUR = {
+    "water": WATER_TEMP_COLOUR, "water_fb": WATER_TEMP_FALLBACK_COLOUR,
+    "high": TIDE_HIGH_COLOUR, "low": TIDE_LOW_COLOUR,
+}
 
 
-def _draw_water_icon(canvas, icon, colour):
-    """Draw a 6x5 water-temp icon at x36 (rows ICON_Y_TOP..+4)."""
+def _draw_slot_icon(canvas, icon, colour):
+    """Draw a small icon at x36 (rows ICON_Y_TOP..+4) — water temp or tide arrow."""
     x0 = DATE_POSITION[0]
     for r, row in enumerate(icon):
         for c, ch in enumerate(row):
@@ -169,9 +182,11 @@ class DateScene(object):
         items = [("date", current_date)]
         if tides:
             if tides.get("high"):
-                items.append(("high", f"H{tides['high']}"))
+                # Time only; the TIDE_UP_ICON (rising arrow) is drawn to its left.
+                items.append(("high", f"{tides['high']}"))
             if tides.get("low"):
-                items.append(("low", f"L{tides['low']}"))
+                # Time only; the TIDE_DOWN_ICON (falling arrow) is drawn to its left.
+                items.append(("low", f"{tides['low']}"))
             # Water temp after tides (same coastal context)
             # Color shifts to blue-grey when reading is from a fallback station
             try:
@@ -185,7 +200,6 @@ class DateScene(object):
                 pass
 
         # Pick current item based on cycle
-        cycle_len = len(items) * _CYCLE_SECONDS
         slot = (self._cycle_counter // _CYCLE_SECONDS) % len(items)
         item_type, display_text = items[slot]
 
@@ -226,19 +240,16 @@ class DateScene(object):
         self._last_date = current_date
         self._last_item_type = item_type
 
-        # Draw with appropriate colour. Sea items draw an icon at x36 and the
-        # number at ICON_NUMBER_X; everything else is plain text at x36.
+        # Draw with appropriate colour. Icon items (sea temp, tide high/low) draw
+        # an icon at x36 and the number/time at the type's number-x; the date is a
+        # per-char gradient; anything else is plain text at x36.
         if item_type in _ICON_TYPES:
-            icon_colour = (WATER_TEMP_FALLBACK_COLOUR if item_type == "water_fb"
-                           else WATER_TEMP_COLOUR)
-            _draw_water_icon(self.canvas, _ICON_TYPES[item_type], icon_colour)
-            graphics.DrawText(self.canvas, DATE_FONT, ICON_NUMBER_X,
+            icon, number_x = _ICON_TYPES[item_type]
+            icon_colour = _ICON_COLOUR[item_type]
+            _draw_slot_icon(self.canvas, icon, icon_colour)
+            graphics.DrawText(self.canvas, DATE_FONT, number_x,
                               DATE_POSITION[1], icon_colour, display_text)
         elif item_type == "date":
             self.draw_gradient_text(display_text, DATE_POSITION[0], DATE_POSITION[1], start_color, end_color)
-        elif item_type == "high":
-            graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0], DATE_POSITION[1], TIDE_HIGH_COLOUR, display_text)
-        elif item_type == "low":
-            graphics.DrawText(self.canvas, DATE_FONT, DATE_POSITION[0], DATE_POSITION[1], TIDE_LOW_COLOUR, display_text)
 
         self._redraw_date = False

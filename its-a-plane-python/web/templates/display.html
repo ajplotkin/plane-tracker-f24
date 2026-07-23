@@ -182,9 +182,16 @@ const COLS = 64, ROWS = 32, FPS = 15, POLL_MS = 1000;
 // Font metrics: extrasmall=4x6, small=5x8 (width x height)
 const XS_W = 4, XS_H = 6, SM_W = 5, SM_H = 8;
 
-// Water-temp rotation icons (must match scenes/date.py SEA_ICON / POOL_ICON)
+// Rotation-slot icons (must match scenes/date.py). Water temp = 6px, tide = 4px.
 const SEA_ICON = ['......', '.##..#', '#..##.', '.##..#', '#..##.'];   // double wave
 const POOL_ICON = ['#....#', '######', '#....#', '######', '.####.'];  // ladder
+const TIDE_UP_ICON = ['.#..', '###.', '.#..', '.#..', '.#..'];         // high tide
+const TIDE_DOWN_ICON = ['.#..', '.#..', '.#..', '###.', '.#..'];       // low tide
+// type -> [icon, number-x]  (6px water icons at x44, 4px tide arrows flush at x40)
+const ROTATION_ICON = {water: [SEA_ICON, 44], water_fb: [SEA_ICON, 44],
+    pool: [POOL_ICON, 44], high: [TIDE_UP_ICON, 40], low: [TIDE_DOWN_ICON, 40]};
+// AQI haze glyph (must match scenes/temperature.py AQI_HAZE_ICON), replaces "A"
+const AQI_HAZE_ICON = ['....', '#.#.', '.#.#', '#.#.', '....'];
 
 // All hex values verified against setup/colours.py
 const C = {
@@ -386,8 +393,13 @@ function drawTemp() {
     if (aqi != null) {
         const ac = aqi > 300 ? '#7e0023' : aqi > 200 ? C.purple : aqi > 150 ? C.red
                  : aqi > 100 ? C.clockDay : aqi > 50 ? C.yellow : C.green;
-        const as = 'A' + aqi;
-        text(as, 36 - 4 * as.length, 5, ac, XS_W);
+        const num = '' + aqi;
+        const iconX = 36 - (4 + 4 * num.length);   // haze glyph(4) + digits, right to x35
+        ctx.fillStyle = ac;
+        for (let r = 0; r < AQI_HAZE_ICON.length; r++)
+            for (let c = 0; c < AQI_HAZE_ICON[r].length; c++)
+                if (AQI_HAZE_ICON[r][c] === '#') ctx.fillRect((iconX + c) * S, r * S, S, S);
+        text(num, iconX + 4, 5, ac, XS_W);
     }
     // E4: temperature.py: red 'ERR' when either reading is missing
     if (state.temperature == null || state.humidity == null) {
@@ -465,15 +477,16 @@ function drawDate(suppressDate) {
             const charColor = lerpColor(startC, endC, pos);
             text(txt[i], 36 + i * XS_W, 11, charColor, XS_W);
         }
-    } else if (item.type === 'water' || item.type === 'water_fb' || item.type === 'pool') {
-        // Sea/pool: draw the 6x5 icon at x36, number at x44 (matches date.py).
+    } else if (ROTATION_ICON[item.type]) {
+        // Icon items (sea/pool temp, tide high/low): icon at x36, number/time at
+        // its type's number-x (matches date.py). item.text is number/time only.
+        const [icon, numX] = ROTATION_ICON[item.type];
         const col = colorMap[item.type] || C.grey;
-        const icon = (item.type === 'pool') ? POOL_ICON : SEA_ICON;
         ctx.fillStyle = col;
         for (let r = 0; r < icon.length; r++)
             for (let c = 0; c < icon[r].length; c++)
                 if (icon[r][c] === '#') ctx.fillRect((36 + c) * S, (6 + r) * S, S, S);
-        text(item.text, 44, 11, col, XS_W);
+        text(item.text, numX, 11, col, XS_W);
     } else {
         text(item.text, 36, 11, colorMap[item.type] || C.grey, XS_W);
     }

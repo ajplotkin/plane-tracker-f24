@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from rgbmatrix import graphics
 from utilities.animator import Animator
-from setup import colours, fonts, frames, screen
+from setup import colours, fonts, frames
 from utilities.temperature import grab_temperature_and_humidity
 try:
     # get_current_uv() interpolates the hourly forecast UV curve to "now" so the
@@ -18,6 +18,9 @@ except ImportError:
 TEMPERATURE_REFRESH_SECONDS = 600
 TEMPERATURE_FONT = fonts.extrasmall
 TEMPERATURE_FONT_HEIGHT = 5
+# AQI "haze/particulate" glyph (4px wide, 5px tall) drawn left of the number in
+# place of the old "A" prefix. Rows map to y0-4, aligned with the 4x6 digits.
+AQI_HAZE_ICON = ("....", "#.#.", ".#.#", "#.#.", "....")
 # EPA AQI hazardous band (#7E0023); the others reuse the palette below.
 AQI_MAROON = graphics.Color(126, 0, 35)
 
@@ -45,6 +48,13 @@ class TemperatureScene(object):
         self._redraw_temp = True
         self._last_uv_draw = None
         self._last_aqi_draw = None
+
+    def _draw_aqi_icon(self, x0, colour):
+        """Draw the 4x5 AQI haze glyph at x0 (rows y0-4, aligned with the digits)."""
+        for r, row in enumerate(AQI_HAZE_ICON):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    self.canvas.SetPixel(x0 + c, r, colour.red, colour.green, colour.blue)
 
     def colour_gradient(self, colour_A, colour_B, ratio):
         return graphics.Color(
@@ -127,7 +137,8 @@ class TemperatureScene(object):
             except Exception:
                 aqi = None
         if aqi is not None and aqi >= AQI_THRESHOLD:
-            aqi_str, aqi_colour = f"A{aqi}", _aqi_colour(aqi)
+            # Number only; the AQI_HAZE_ICON is drawn to its left (replaces "A").
+            aqi_str, aqi_colour = f"{aqi}", _aqi_colour(aqi)
         else:
             aqi_str, aqi_colour = "", colours.GREEN
 
@@ -181,17 +192,20 @@ class TemperatureScene(object):
                               TEMPERATURE_FONT_HEIGHT, uv_colour, uv_str)
             self._last_uv_draw = (uv_str, uv_x)
 
-        # AQI chip, right-aligned to x=35 (in the gap after the time, before the
-        # temp at x=36). "A<nnn>" is 4 chars max -> starts x20, clear of the
-        # 4-5 char time (which never runs past x19).
+        # AQI chip: a haze glyph + the number, right-aligned to x=35 in the gap
+        # after the time, before the temp at x=36. glyph(4) + up to 3 digits(12)
+        # = 16px max -> starts x20, clear of the 4-5 char time (never past x19).
+        # _last_aqi_draw stores (number_str, icon_x); the number sits at icon_x+4.
         if self._last_aqi_draw:
             old_str, old_x = self._last_aqi_draw
-            graphics.DrawText(self.canvas, TEMPERATURE_FONT, old_x,
+            graphics.DrawText(self.canvas, TEMPERATURE_FONT, old_x + 4,
                               TEMPERATURE_FONT_HEIGHT, colours.BLACK, old_str)
+            self._draw_aqi_icon(old_x, colours.BLACK)
             self._last_aqi_draw = None
         if aqi_str:
-            aqi_x = 36 - 4 * len(aqi_str)
-            graphics.DrawText(self.canvas, TEMPERATURE_FONT, aqi_x,
+            aqi_x = 36 - (4 + 4 * len(aqi_str))
+            self._draw_aqi_icon(aqi_x, aqi_colour)
+            graphics.DrawText(self.canvas, TEMPERATURE_FONT, aqi_x + 4,
                               TEMPERATURE_FONT_HEIGHT, aqi_colour, aqi_str)
             self._last_aqi_draw = (aqi_str, aqi_x)
 
