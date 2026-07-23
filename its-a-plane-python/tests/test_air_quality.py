@@ -275,11 +275,33 @@ def test_failed_geocode_backs_off():
 def test_epa_colour_bands():
     import scenes.temperature as t
     from setup import colours
-    assert t._aqi_colour(40) is colours.GREEN            # Good
-    assert t._aqi_colour(75) is colours.YELLOW           # Moderate
-    assert t._aqi_colour(125) is colours.LIGHT_ORANGE    # USG
-    assert t._aqi_colour(175) is colours.RED             # Unhealthy
-    assert t._aqi_colour(250) is colours.PURPLE          # Very Unhealthy
+    assert t._aqi_colour(40) is t.AQI_GOOD               # Good
+    assert t._aqi_colour(75) is t.AQI_MODERATE           # Moderate
+    assert t._aqi_colour(125) is t.AQI_USG               # USG
+    assert t._aqi_colour(175) is t.AQI_UNHEALTHY         # Unhealthy
+    assert t._aqi_colour(250) is t.AQI_VERY_UNHEALTHY    # Very Unhealthy
     assert t._aqi_colour(400) is t.AQI_MAROON            # Hazardous
-    # guard against the vacuous-mock regression: the constants must be distinct
-    assert colours.GREEN is not t.AQI_MAROON
+    # exact official EPA hex values (airnow.gov)
+    def rgb(c):
+        return (c.red, c.green, c.blue)
+    assert rgb(t.AQI_GOOD) == (0, 228, 0)                # #00E400
+    assert rgb(t.AQI_MODERATE) == (255, 255, 0)          # #FFFF00
+    assert rgb(t.AQI_USG) == (255, 126, 0)               # #FF7E00
+    assert rgb(t.AQI_UNHEALTHY) == (255, 0, 0)           # #FF0000
+    assert rgb(t.AQI_VERY_UNHEALTHY) == (143, 63, 151)   # #8F3F97
+    assert rgb(t.AQI_MAROON) == (126, 0, 35)             # #7E0023
+    # AQI has its own palette now (decoupled from the shared UV/etc. colours)
+    assert t.AQI_USG is not colours.LIGHT_ORANGE
+    assert t.AQI_GOOD is not t.AQI_MAROON                # distinct (vacuous-mock guard)
+
+
+def test_aqi_haze_glyph_and_layout_fit_the_gap():
+    """The 'A' prefix is replaced by a 4x5 haze glyph. glyph(4) + up to 3 digits
+    (12) = 16px, right-aligned to x35 -> starts at x20, clear of the time (x0-19)."""
+    import scenes.temperature as t
+    assert t.AQI_HAZE_ICON == ("....", "#.#.", ".#.#", "#.#.", "....")
+    assert len(t.AQI_HAZE_ICON) == 5 and all(len(r) == 4 for r in t.AQI_HAZE_ICON)
+    for aqi in (50, 234, 500):
+        icon_x = 36 - (4 + 4 * len(str(aqi)))
+        assert icon_x >= 20                            # clear of the time zone (x0-19)
+        assert icon_x + 4 + 4 * len(str(aqi)) == 36    # right-aligned to x35

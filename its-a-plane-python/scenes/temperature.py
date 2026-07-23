@@ -21,18 +21,24 @@ TEMPERATURE_FONT_HEIGHT = 5
 # AQI "haze/particulate" glyph (4px wide, 5px tall) drawn left of the number in
 # place of the old "A" prefix. Rows map to y0-4, aligned with the 4x6 digits.
 AQI_HAZE_ICON = ("....", "#.#.", ".#.#", "#.#.", "....")
-# EPA AQI hazardous band (#7E0023); the others reuse the palette below.
-AQI_MAROON = graphics.Color(126, 0, 35)
+# Official EPA AQI category colours (airnow.gov). Kept as their own constants
+# (not the shared palette, which UV etc. use) so AQI matches the standard exactly.
+AQI_GOOD = graphics.Color(0, 228, 0)            # #00E400
+AQI_MODERATE = graphics.Color(255, 255, 0)      # #FFFF00
+AQI_USG = graphics.Color(255, 126, 0)           # #FF7E00  Unhealthy for Sensitive Groups
+AQI_UNHEALTHY = graphics.Color(255, 0, 0)       # #FF0000
+AQI_VERY_UNHEALTHY = graphics.Color(143, 63, 151)  # #8F3F97
+AQI_MAROON = graphics.Color(126, 0, 35)         # #7E0023  Hazardous
 
 
 def _aqi_colour(aqi):
-    """EPA AQI category colour."""
+    """Official EPA AQI category colour (airnow.gov)."""
     if aqi > 300:   return AQI_MAROON            # Hazardous
-    if aqi > 200:   return colours.PURPLE        # Very Unhealthy
-    if aqi > 150:   return colours.RED           # Unhealthy
-    if aqi > 100:   return colours.LIGHT_ORANGE  # Unhealthy for Sensitive Groups
-    if aqi > 50:    return colours.YELLOW        # Moderate
-    return colours.GREEN                         # Good
+    if aqi > 200:   return AQI_VERY_UNHEALTHY    # Very Unhealthy
+    if aqi > 150:   return AQI_UNHEALTHY         # Unhealthy
+    if aqi > 100:   return AQI_USG               # Unhealthy for Sensitive Groups
+    if aqi > 50:    return AQI_MODERATE          # Moderate
+    return AQI_GOOD                              # Good
 # (Night-boundary redraws removed: adjust_brightness() acts at panel level,
 # pixel content needs no repaint.)
 

@@ -391,8 +391,9 @@ function drawTemp() {
     // whenever present.
     const aqi = state.aqi;
     if (aqi != null) {
-        const ac = aqi > 300 ? '#7e0023' : aqi > 200 ? C.purple : aqi > 150 ? C.red
-                 : aqi > 100 ? C.clockDay : aqi > 50 ? C.yellow : C.green;
+        // Official EPA AQI band colours (airnow.gov) — match scenes/temperature.py
+        const ac = aqi > 300 ? '#7e0023' : aqi > 200 ? '#8f3f97' : aqi > 150 ? '#ff0000'
+                 : aqi > 100 ? '#ff7e00' : aqi > 50 ? '#ffff00' : '#00e400';
         const num = '' + aqi;
         const iconX = 36 - (4 + 4 * num.length);   // haze glyph(4) + digits, right to x35
         ctx.fillStyle = ac;
