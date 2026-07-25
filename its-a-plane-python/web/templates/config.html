@@ -274,6 +274,16 @@
                 <span class="hint">NOAA station ID (empty = none)</span>
             </div>
             <div class="field">
+                <label>WATER_TEMP_FALLBACK_STATION</label>
+                <input type="text" id="cfg-WATER_TEMP_FALLBACK_STATION" placeholder="46026" />
+                <span class="hint">Backup water-temp source if the primary returns no data. 7-digit = NOAA CO-OPS; &le;5-digit = NDBC buoy. (empty = none)</span>
+            </div>
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-WATER_TEMP_FALLBACK_ENABLED" />
+                <label for="cfg-WATER_TEMP_FALLBACK_ENABLED">WATER_TEMP_FALLBACK_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Use the fallback station when the primary is offline</span>
+            </div>
+            <div class="field">
                 <label>AIRPORT_STATUS_LIST</label>
                 <input type="text" id="cfg-AIRPORT_STATUS_LIST" placeholder="JFK,LGA,EWR" />
                 <span class="hint">FAA delay alerts (comma-separated IATA codes)</span>
@@ -613,7 +623,7 @@
         const CONFIG_FIELDS = [
             'HOME_LAT', 'HOME_LON',
             'ZONE_TL_LAT', 'ZONE_TL_LON', 'ZONE_BR_LAT', 'ZONE_BR_LON',
-            'JOURNEY_CODE_SELECTED', 'TEMPERATURE_LOCATION', 'TIDE_STATION', 'WATER_TEMP_STATION', 'AIRPORT_STATUS_LIST',
+            'JOURNEY_CODE_SELECTED', 'TEMPERATURE_LOCATION', 'TIDE_STATION', 'WATER_TEMP_STATION', 'WATER_TEMP_FALLBACK_STATION', 'WATER_TEMP_FALLBACK_ENABLED', 'AIRPORT_STATUS_LIST',
             'DISTANCE_UNITS', 'SPEED_UNITS', 'TEMPERATURE_UNITS', 'CLOCK_FORMAT',
             'BRIGHTNESS', 'BRIGHTNESS_NIGHT', 'GPIO_SLOWDOWN', 'LED_RGB_SEQUENCE',
             'NIGHT_BRIGHTNESS', 'NIGHT_START', 'NIGHT_END', 'HAT_PWM_ENABLED',
@@ -628,14 +638,14 @@
             'AQI_ALERTS_ENABLED', 'AQI_THRESHOLD',
         ];
 
-        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME', 'AQI_ALERTS_ENABLED'];
+        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME', 'AQI_ALERTS_ENABLED', 'WATER_TEMP_FALLBACK_ENABLED'];
         const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
         // Fields where an empty value is meaningful ("blank = disabled", or
         // "blank = fall back to the default") and must be sent so the user can
         // actually clear them. Without this, a non-clearable field is dropped
         // when blank and the server merge keeps its old value — so a stray value
         // (e.g. JOURNEY_BLANK_FILLER="Unknown") can never be removed via the UI.
-        const CLEARABLE_FIELDS = ['TIDE_STATION', 'WATER_TEMP_STATION', 'AIRPORT_STATUS_LIST',
+        const CLEARABLE_FIELDS = ['TIDE_STATION', 'WATER_TEMP_STATION', 'WATER_TEMP_FALLBACK_STATION', 'AIRPORT_STATUS_LIST',
             'BLOCKED_CALLSIGNS', 'ATC_CUSTOM_FEEDS', 'ATC_QUIET_HOURS',
             'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END', 'JOURNEY_BLANK_FILLER'];
 
