@@ -9,6 +9,14 @@ Type=simple
 EnvironmentFile=/etc/plane-tracker.env
 WorkingDirectory=__REPO_DIR__/its-a-plane-python
 Environment=PLANE_TRACKER_DATA_DIR=/var/lib/plane-tracker
+# Cap glibc malloc arenas. The overhead poll starts a fresh thread each cycle
+# (utilities/overhead.py) that does an HTTP fetch and exits. glibc hands every
+# new thread its own arena (default ceiling 8*nproc), so the per-poll C-level
+# allocations scatter across arenas; freed chunks interleave with live ones and
+# malloc_trim() can only return fully-free pages, so RSS ratchets. On a 512MB
+# Pi that ends in SD-card swap and visible scroll stutter. Capping arenas at 2
+# keeps the heap compact enough to reclaim. Costs nothing on larger boards.
+Environment=MALLOC_ARENA_MAX=2
 
 # Ensure writable data directory exists
 ExecStartPre=/bin/bash -c "mkdir -p /var/lib/plane-tracker/maps"
