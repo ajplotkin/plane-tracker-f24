@@ -15,7 +15,9 @@ Environment=PLANE_TRACKER_DATA_DIR=/var/lib/plane-tracker
 # allocations scatter across arenas; freed chunks interleave with live ones and
 # malloc_trim() can only return fully-free pages, so RSS ratchets. On a 512MB
 # Pi that ends in SD-card swap and visible scroll stutter. Capping arenas at 2
-# keeps the heap compact enough to reclaim. Costs nothing on larger boards.
+# keeps the heap compact enough to reclaim. Effectively free on larger boards:
+# fewer arenas can add malloc lock contention in heavily multithreaded native
+# code, but this workload is GIL-bound with one short-lived poll thread.
 Environment=MALLOC_ARENA_MAX=2
 
 # Ensure writable data directory exists
