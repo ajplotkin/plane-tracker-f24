@@ -12,9 +12,11 @@ Usage:
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 
 import requests
+from utilities.cpu_affinity import run_off_render_core
 
 try:
     from utilities.api_usage import log_call as _log_api
@@ -61,7 +63,39 @@ except (ImportError, ModuleNotFoundError, NameError):
 # In-memory cache
 _cached_tides = None  # list of {"t": "...", "type": "H"/"L"}
 _cached_date = None   # date string "2026-05-23"
-_tide_next_retry = 0.0  # epoch; gate blocking fetches after a failure
+_tide_next_retry = 0.0  # epoch; gate fetch dispatches after a failure
+
+# One in-flight background refresh for the whole module (tide predictions and the
+# water temp both hit NOAA; serialising them keeps at most one worker thread alive
+# at a time on the 512MB Pi). Whichever getter finds the flag set simply returns
+# its cached value and re-tries on a later frame — nothing blocks, and no gate
+# timestamp is consumed.
+_refresh_lock = threading.Lock()
+# NOTE: the check-then-set of _refresh_pending in the getters is deliberately
+# NOT lock-protected. It is safe only because every getter here has exactly ONE
+# caller thread: Animator.play() runs all scenes sequentially in one loop, and
+# the web mirror is a SEPARATE PROCESS. If a second caller thread is ever added,
+# two workers could briefly overlap (serialized by _refresh_lock, so bounded at
+# 2 -- not unbounded growth), but the "one in-flight" invariant becomes soft.
+_refresh_pending = False
+
+
+def _dispatch(target, args):
+    """Start a background worker if none is in flight. Returns True if it started.
+
+    Mirrors airport_status.py: the pending flag is cleared again if Thread.start()
+    itself fails (OOM on the 512MB Pi) so the module can never wedge.
+    """
+    global _refresh_pending
+    if _refresh_pending:
+        return False
+    _refresh_pending = True
+    try:
+        threading.Thread(target=target, args=args, daemon=True).start()
+        return True
+    except Exception:
+        _refresh_pending = False   # start() failed (OOM) — retry next call
+        return False
 
 
 def _format_time(time_str):
@@ -130,11 +164,27 @@ def _load_cache():
     return None
 
 
+def _background_predictions(station, today):
+    """Fetch today's predictions in a background thread so the display never blocks."""
+    global _cached_tides, _cached_date, _refresh_pending
+    with _refresh_lock:
+        try:
+            run_off_render_core()   # inside try: must never wedge the flag
+            predictions = _fetch_predictions(station)
+            if predictions:
+                _cached_tides = predictions
+                _cached_date = today
+        finally:
+            _refresh_pending = False
+
+
 def get_next_tides():
     """
     Return next high and low tide times.
 
     Returns {"high": "4:52p", "low": "11:07p"} or None if no station configured.
+    NEVER blocks on the network: a missing/stale day dispatches a background fetch
+    and returns None until it lands.
     """
     global _cached_tides, _cached_date, _tide_next_retry
 
@@ -145,22 +195,37 @@ def get_next_tides():
 
     # Refresh once per day
     if _cached_date != today or _cached_tides is None:
-        _cached_tides = _load_cache()
-        if _cached_tides:
+        cached = _load_cache()
+        if cached:
+            _cached_tides = cached
             _cached_date = today
         else:
-            # This runs on the 1 Hz date-scene render thread. Without a retry
-            # gate, a NOAA outage or bad station drove a blocking HTTP fetch on
-            # EVERY frame. Gate failed fetches so we retry at most every 5 min.
+            # Drop yesterday's predictions on the date rollover (the synchronous
+            # version did this implicitly via `_cached_tides = _load_cache()`).
+            # Re-checked here rather than unconditionally to NARROW — not close —
+            # the window: the worker assigns _cached_tides before _cached_date, so
+            # a refresh landing between those two stores still looks like the old
+            # date here and its fresh predictions get nulled. Self-healing and
+            # midnight-only: the worker wrote the disk cache before returning, so
+            # the next frame's _load_cache() above restores them (cost: one None
+            # frame + one redundant NOAA dispatch). Do NOT "fix" this by reversing
+            # the worker's store order — that opens a worse window where
+            # yesterday's tides are formatted as today's.
+            if _cached_date != today:
+                _cached_tides = None
+            # This runs on the 1 Hz date-scene render thread, so the fetch is
+            # dispatched to a worker. Keep the retry gate too: without it a NOAA
+            # outage or bad station drove a fetch on EVERY frame. Gate failed
+            # fetches so we retry at most every 5 min.
             from time import time as _now
-            if _now() < _tide_next_retry:
+            now = _now()
+            if now < _tide_next_retry:
                 return None
-            _tide_next_retry = _now() + 300
-            _cached_tides = _fetch_predictions(TIDE_STATION)
-            if _cached_tides:
-                _cached_date = today
-            else:
-                return None
+            prev_retry = _tide_next_retry
+            _tide_next_retry = now + 300   # advance BEFORE dispatch (anti-hammer)
+            if not _dispatch(_background_predictions, (TIDE_STATION, today)):
+                _tide_next_retry = prev_retry   # in flight / start() failed — retry later
+            return None                          # nothing to show until it lands
 
     # Find next H and L from current time
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -251,57 +316,72 @@ def _fetch_ndbc_temp(station):
     return None
 
 
+def _background_water_temp(primary, fallback, fallback_enabled):
+    """Read the water temp in a background thread so the display never blocks.
+    Tries the primary CO-OPS station, then the fallback (CO-OPS or NDBC buoy)."""
+    global _water_temp, _water_temp_is_fallback, _refresh_pending
+    with _refresh_lock:
+        try:
+            run_off_render_core()   # inside try: must never wedge the flag
+            # Try primary station (CO-OPS)
+            val = _fetch_coops_temp(primary)
+            if val is not None:
+                _water_temp = str(round(val))
+                _water_temp_is_fallback = False
+                logger.info(f"[WaterTemp] {_water_temp}° from primary station {primary}")
+                return
+
+            # Try fallback if configured and enabled
+            if fallback and fallback_enabled:
+                # NDBC buoys are 5-digit numeric; CO-OPS stations are 7-digit
+                if len(fallback) <= 5 and fallback.isdigit():
+                    val = _fetch_ndbc_temp(fallback)
+                else:
+                    val = _fetch_coops_temp(fallback)
+
+                if val is not None:
+                    _water_temp = str(round(val))
+                    _water_temp_is_fallback = True
+                    logger.info(f"[WaterTemp] {_water_temp}° from FALLBACK station {fallback}")
+                    return
+
+            logger.warning("[WaterTemp] No data from primary or fallback")
+        finally:
+            _refresh_pending = False
+
+
 def get_water_temp():
     """
     Return current ocean water temperature as a string (e.g. "62") or None.
 
-    Tries the primary CO-OPS station first; if it returns no data and a
-    fallback station is configured + enabled, tries the fallback (which
-    may be a CO-OPS station or an NDBC buoy).
+    NEVER blocks on the network: a stale cache dispatches a background refresh
+    (primary CO-OPS station, then the configured fallback) and this returns the
+    last good value immediately — None until the first reading lands.
     """
-    global _water_temp, _water_temp_ts, _water_temp_is_fallback
+    global _water_temp_ts
     from time import time
 
     if not WATER_TEMP_STATION:
         return None
 
     now = time()
-    # Gate network attempts on the poll interval REGARDLESS of success. This
-    # runs on the 1 Hz date-scene render thread; before, a failed fetch left
+    # Gate network attempts on the poll interval REGARDLESS of success. This is
+    # called from the 1 Hz date-scene render thread; before, a failed fetch left
     # _water_temp_ts unchanged (and a never-yet-successful fetch left
     # _water_temp None), so an offline station drove a blocking HTTP request
     # EVERY second and froze the LED. Advancing the timestamp before the
     # attempt bounds it to one try per interval (water temp changes slowly).
     if (now - _water_temp_ts) < _WATER_TEMP_POLL:
         return _water_temp
-    _water_temp_ts = now
+    if _refresh_pending:
+        return _water_temp   # a refresh is already in flight — don't stack threads
 
-    # Try primary station (CO-OPS)
-    val = _fetch_coops_temp(WATER_TEMP_STATION)
-    if val is not None:
-        _water_temp = str(round(val))
-        _water_temp_ts = now
-        _water_temp_is_fallback = False
-        logger.info(f"[WaterTemp] {_water_temp}° from primary station {WATER_TEMP_STATION}")
-        return _water_temp
-
-    # Try fallback if configured and enabled
-    if WATER_TEMP_FALLBACK_STATION and WATER_TEMP_FALLBACK_ENABLED:
-        fb = WATER_TEMP_FALLBACK_STATION
-        # NDBC buoys are 5-digit numeric; CO-OPS stations are 7-digit
-        if len(fb) <= 5 and fb.isdigit():
-            val = _fetch_ndbc_temp(fb)
-        else:
-            val = _fetch_coops_temp(fb)
-
-        if val is not None:
-            _water_temp = str(round(val))
-            _water_temp_ts = now
-            _water_temp_is_fallback = True
-            logger.info(f"[WaterTemp] {_water_temp}° from FALLBACK station {fb}")
-            return _water_temp
-
-    logger.warning("[WaterTemp] No data from primary or fallback")
+    prev_ts = _water_temp_ts
+    _water_temp_ts = now     # advance BEFORE dispatch (anti-hammer)
+    if not _dispatch(_background_water_temp,
+                     (WATER_TEMP_STATION, WATER_TEMP_FALLBACK_STATION,
+                      WATER_TEMP_FALLBACK_ENABLED)):
+        _water_temp_ts = prev_ts   # start() failed — retry next call
     return _water_temp
 
 

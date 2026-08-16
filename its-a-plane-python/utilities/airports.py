@@ -18,6 +18,7 @@ import os
 import threading
 import requests
 from io import StringIO
+from utilities.cpu_affinity import run_off_render_core
 
 BASE_DIR    = os.path.dirname(os.path.dirname(__file__))
 CACHE_FILE  = os.path.join(BASE_DIR, "airports.json")
@@ -108,13 +109,29 @@ def _background_refresh():
     global _db, _loaded, _refresh_pending, _not_found
     with _load_lock:
         try:
-            if os.path.exists(CACHE_FILE):
-                os.remove(CACHE_FILE)
+            run_off_render_core()   # inside try: must never wedge the flag
+            # NOTE: deliberately does NOT remove CACHE_FILE first.
+            # _download_and_build() rewrites it in place (open(..., "w")), so the
+            # remove was never needed — and it was harmful twice over:
+            #   1. os.remove() needs write permission on the DIRECTORY, not the
+            #      file. The rgbmatrix library drops privileges to `daemon` after
+            #      GPIO init, and the app dir is owned by the login user, so this
+            #      raised PermissionError, killed this thread, and the airport DB
+            #      silently stopped refreshing — ernie's was stale from 2026-07-24,
+            #      so unknown codes (e.g. 'QQT') never resolved.
+            #   2. If the download then failed, the cache was already gone, turning
+            #      a transient network error into a lost database.
+            # Rewriting in place only needs the FILE writable, which is what the
+            # units' ExecStartPre chmod provides.
             new_db = _download_and_build()
             if new_db:
                 _db = new_db
                 _loaded = True
                 _not_found = set()  # reset so newly-added airports can be found
+        except Exception as e:
+            # Never kill the thread with a traceback: the last-good in-memory _db
+            # stays usable and we retry on the next miss.
+            print(f"[Airports] background refresh failed: {e}")
         finally:
             _refresh_pending = False
 
@@ -203,11 +220,20 @@ def icao_to_iata(icao_code):
 
 
 def refresh():
-    """Force re-download of airport database."""
+    """Force re-download of airport database (manual/CLI helper).
+
+    The remove is what forces _load() to re-download rather than reuse the cache.
+    It can legitimately fail when the process lacks write permission on the app
+    directory (see _background_refresh), so it degrades to a normal _load()
+    instead of raising.
+    """
     global _db, _loaded
     _loaded = False
-    if os.path.exists(CACHE_FILE):
-        os.remove(CACHE_FILE)
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+    except OSError as e:
+        print(f"[Airports] could not clear cache to force refresh: {e}")
     _load()
 
 

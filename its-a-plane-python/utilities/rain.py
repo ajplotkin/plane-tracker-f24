@@ -16,9 +16,11 @@ Usage:
 import json
 import logging
 import os
+import threading
 import time
 
 import requests
+from utilities.cpu_affinity import run_off_render_core
 
 try:
     from utilities.api_usage import log_call as _log_api
@@ -37,7 +39,15 @@ _MS_TO_MPH = 2.237  # meters/sec to mph
 
 # In-memory cache
 _cached_data = None  # raw API response dict
-_cached_ts = 0.0     # epoch of last successful fetch
+_cached_ts = 0.0     # epoch of last fetch ATTEMPT (gates the poll interval)
+_refresh_lock = threading.Lock()
+# NOTE: the check-then-set of _refresh_pending in the getters is deliberately
+# NOT lock-protected. It is safe only because every getter here has exactly ONE
+# caller thread: Animator.play() runs all scenes sequentially in one loop, and
+# the web mirror is a SEPARATE PROCESS. If a second caller thread is ever added,
+# two workers could briefly overlap (serialized by _refresh_lock, so bounded at
+# 2 -- not unbounded growth), but the "one in-flight" invariant becomes soft.
+_refresh_pending = False   # one in-flight refresh at a time
 
 
 def _fetch(lat, lon, api_key):
@@ -85,9 +95,22 @@ def _load_cache():
     return None, 0
 
 
+def _background_fetch(lat, lon, api_key):
+    """Fetch OWM data in a background thread so the display never blocks."""
+    global _cached_data, _refresh_pending
+    with _refresh_lock:
+        try:
+            run_off_render_core()   # inside try: must never wedge the flag
+            data = _fetch(lat, lon, api_key)
+            if data:
+                _cached_data = data
+        finally:
+            _refresh_pending = False
+
+
 def _refresh():
-    """Refresh data if poll interval has elapsed."""
-    global _cached_data, _cached_ts
+    """Return cached data immediately; kick off a background fetch if stale."""
+    global _cached_data, _cached_ts, _refresh_pending
 
     # Read config at call time so web UI reload takes effect
     import config as cfg
@@ -109,16 +132,24 @@ def _refresh():
             _cached_ts = disk_ts
             logger.info("[Rain] Loaded from disk cache")
 
-    # Fetch from API if interval elapsed. This runs synchronously on the 1 Hz
-    # clock-scene render thread; advance _cached_ts BEFORE the blocking call so
-    # an OWM outage / revoked key / 429 can't drive a fetch every second (it
-    # left _cached_ts unchanged on failure, and never-succeeded left
+    # Dispatch a NON-BLOCKING background fetch if the interval elapsed. The fetch
+    # used to run synchronously on the 1 Hz clock-scene render thread (a WAN hang
+    # froze the scroll for the full timeout). _cached_ts is still advanced BEFORE
+    # the dispatch so an OWM outage / revoked key / 429 can't drive a fetch every
+    # second (it left _cached_ts unchanged on failure, and never-succeeded left
     # _cached_data None, so both paths re-fetched every frame).
-    if (now - _cached_ts) >= _POLL_INTERVAL:
+    if (now - _cached_ts) >= _POLL_INTERVAL and not _refresh_pending:
+        prev_ts = _cached_ts
         _cached_ts = now
-        data = _fetch(location[0], location[1], api_key)
-        if data:
-            _cached_data = data
+        _refresh_pending = True
+        try:
+            threading.Thread(target=_background_fetch,
+                             args=(location[0], location[1], api_key),
+                             daemon=True).start()
+        except Exception:
+            # start() failed (OOM) — undo the gate so the next call retries.
+            _refresh_pending = False
+            _cached_ts = prev_ts
 
     return _cached_data
 

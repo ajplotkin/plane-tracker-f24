@@ -304,7 +304,15 @@ def _download_parks():
 
 
 def _load_parks():
-    """Load parks from cache or download. Thread-safe."""
+    """Load parks from cache or download. Thread-safe.
+
+    NOTE: deliberately does NOT call run_off_render_core(). This runs on the MAIN
+    RENDER THREAD too — get_nearest_landmark() calls it synchronously, and that is
+    reached from the tracked_stats keyframe (scenes/trackedstats.py) — so moving
+    the caller's affinity here would un-pin the render thread from the isolated
+    core, the exact inverse of the intent. The background entry point
+    Overhead._preload_parks() makes the call before invoking this.
+    """
     global _parks_db, _parks_loaded
     if _parks_loaded:
         return

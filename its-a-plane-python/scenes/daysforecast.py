@@ -90,12 +90,18 @@ class DaysForecastScene(object):
             return
 
         # Refresh the cache at most once per hour, with a retry backoff
-        # after failures. Fetch BEFORE touching the canvas — the old code
-        # cleared the live rows first, leaving the bottom of the panel
-        # black for the whole (blocking) HTTP round-trip.
+        # after failures. grab_forecast() is non-blocking now (it dispatches a
+        # worker and returns the last good list), but the ordering still holds:
+        # never touch the canvas before we know what we're drawing.
+        #
+        # While we have NOTHING to draw, ask on every frame instead of waiting
+        # out FETCH_RETRY_SECONDS: the getter is self-gated (cache TTL -> rate
+        # limiter -> 5-min dispatch gate) so it costs a few comparisons, and the
+        # 60s gate would otherwise leave the bottom third of the panel black for
+        # a minute after the background fetch had already landed.
         current_hour = datetime.now().hour
         if self._cached_forecast is None or self._last_hour != current_hour:
-            if time.time() >= self._fetch_retry_after:
+            if self._cached_forecast is None or time.time() >= self._fetch_retry_after:
                 forecast = grab_forecast(tag="days")
                 if forecast:
                     self._cached_forecast = forecast

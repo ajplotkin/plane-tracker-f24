@@ -16,6 +16,11 @@ except ImportError:
 
 # Scene Setup
 TEMPERATURE_REFRESH_SECONDS = 600
+# How long to leave the temperature cells blank before giving up and drawing
+# "ERR". utilities/temperature.py is non-blocking now, so on a cold boot with no
+# disk cache the first reading arrives a beat AFTER the first frame; without this
+# every boot flashed a red ERR.
+ERR_GRACE_SECONDS = 15
 TEMPERATURE_FONT = fonts.extrasmall
 TEMPERATURE_FONT_HEIGHT = 5
 # AQI "haze/particulate" glyph (4px wide, 5px tall) drawn left of the number in
@@ -51,6 +56,7 @@ class TemperatureScene(object):
         self._last_updated = None
         self._cached_temp = None
         self._cached_humidity = None
+        self._first_temp_attempt = None   # when we first asked (drives ERR grace)
         self._redraw_temp = True
         self._last_uv_draw = None
         self._last_aqi_draw = None
@@ -82,24 +88,32 @@ class TemperatureScene(object):
 
         # Determine seconds since last update
         seconds_since_update = (datetime.now() - self._last_updated).total_seconds() if self._last_updated else TEMPERATURE_REFRESH_SECONDS
-        retry_interval_on_error = 60
 
-        # Determine if we need to fetch new data
-        need_fetch = (
-            seconds_since_update >= TEMPERATURE_REFRESH_SECONDS or
-            (self._cached_temp is None and (self._last_updated is None or seconds_since_update >= retry_interval_on_error))
-        )
+        # Ask on every frame until we have a reading, then settle into the
+        # refresh cadence. grab_temperature_and_humidity() is NON-BLOCKING and
+        # self-gated (cache TTL -> per-endpoint rate limiter -> 5-min dispatch
+        # gate), so re-asking costs a few comparisons and picks the value up the
+        # instant the background worker lands it. The old 60s error backoff here
+        # existed to stop the render thread re-entering a BLOCKING fetch.
+        # NOTE: for THIS scene the old condition was already near-equivalent on a
+        # cold boot -- it re-armed _last_updated to now-540s, so the 60s test was
+        # immediately true and it re-asked every frame anyway. (Verified by
+        # mutation: restoring the old condition still passes.) The rewrite is a
+        # simplification here, not a bug fix. The equivalent gates in
+        # daysforecast.py (60s) and clock.py (300s) DID strand async data and are
+        # genuine fixes.
+        need_fetch = (self._cached_temp is None
+                      or seconds_since_update >= TEMPERATURE_REFRESH_SECONDS)
 
         if need_fetch:
+            if self._first_temp_attempt is None:
+                self._first_temp_attempt = datetime.now()
             current_temperature, current_humidity = grab_temperature_and_humidity()
             if current_temperature is not None and current_humidity is not None:
                 self._cached_temp = (current_temperature, current_humidity)
                 self._last_updated = datetime.now()
-            else:
-                # Failed — keep showing the cached value (if any) and retry
-                # in a minute instead of hammering the API every second
-                self._last_updated = datetime.now() - timedelta(
-                    seconds=TEMPERATURE_REFRESH_SECONDS - retry_interval_on_error)
+            # else: keep the last good value (self._cached_temp is never
+            # cleared, so the drawn string can't flap value -> ERR -> value).
 
         # Determine display string and colour from the freshest good data
         if self._cached_temp:
@@ -108,9 +122,17 @@ class TemperatureScene(object):
             humidity_ratio = current_humidity / 100.0
             temp_colour = self.colour_gradient(colours.WHITE, colours.DARK_BLUE, humidity_ratio)
         else:
+            # No reading yet. The first fetch is now asynchronous, so draw
+            # NOTHING for a short grace period rather than flashing "ERR" on
+            # every cold boot for the second or two the worker needs. "" draws
+            # no glyphs and erases none (there are none yet), and the UV/AQI
+            # chips beside it still update. Once ERR is drawn it is replaced by
+            # the real value on arrival — one change, one repaint, no flap.
             current_temperature = None
-            display_str = "ERR"
             temp_colour = colours.RED
+            waited = (datetime.now() - self._first_temp_attempt
+                      if self._first_temp_attempt else timedelta(0))
+            display_str = "" if waited < timedelta(seconds=ERR_GRACE_SECONDS) else "ERR"
 
         # UV chip: shown right-aligned on the temp row instead of taking
         # a slot in the alert rotation. EPA/WHO colours.

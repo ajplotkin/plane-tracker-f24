@@ -2,14 +2,22 @@
 
 rgbmatrix is stubbed in tests/conftest.py (graphics.Color is a REAL class there,
 so the colour-band identity assertions below are meaningful).
+
+get_aqi() is NON-BLOCKING: it dispatches the state lookup + AirNow/Open-Meteo
+fetches to a background worker and returns the last good value immediately, so
+the 1 Hz temperature scene never waits on the WAN. Tests call settle() to join
+that worker before asserting on a fresh value — always inside the patch block,
+so the worker can't outlive the mock and hit the real endpoints.
 """
 import json
 import os
 import tempfile
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import config as cfg
+from tests.conftest import settle
 from utilities import air_quality
 
 # Redirect the on-disk caches to a scratch dir so tests can't write phantom AQI
@@ -27,11 +35,22 @@ def _reset(state="CO"):
     air_quality._state = state      # pre-resolve so tests don't hit Nominatim
     air_quality._state_loc = None   # pinned to the loc by _set_cfg below
     air_quality._state_try_ts = 0.0
+    air_quality._refresh_pending = False
     for f in (air_quality._CACHE_FILE, air_quality._STATE_FILE):
         try:
             os.remove(f)
         except OSError:
             pass
+
+
+def _poll(**patch_kwargs):
+    """Run one full AQI refresh: dispatch + join the background worker, then
+    return what the NEXT getter call serves (and the mocks, for call asserts)."""
+    with patch("utilities.air_quality.requests.post", **patch_kwargs.pop("post")) as p, \
+         patch("utilities.air_quality.requests.get", **patch_kwargs.pop("get")) as g:
+        air_quality.get_aqi()
+        settle(air_quality)
+        return air_quality.get_aqi(), p, g
 
 
 def _set_cfg(enabled=True, loc=None):
@@ -72,69 +91,118 @@ def test_airnow_returns_max_observed_and_ignores_forecast():
         {"reportingArea": "Example Region", "parameter": "PM2.5", "aqi": 185, "dataType": "F"},
         {"reportingArea": "Example Region", "parameter": "OZONE", "aqi": None, "dataType": "F"},
     ]
-    with patch("utilities.air_quality.requests.post", return_value=_airnow(entries)) as p, \
-         patch("utilities.air_quality.requests.get") as g:
-        assert air_quality.get_aqi() == 93
-        assert p.call_args.kwargs["data"]["stateCode"] == "CO"   # the discriminator
-        g.assert_not_called()                                    # no fallback needed
+    got, p, g = _poll(post={"return_value": _airnow(entries)}, get={})
+    assert got == 93
+    assert p.call_args.kwargs["data"]["stateCode"] == "CO"   # the discriminator
+    g.assert_not_called()                                    # no fallback needed
 
 
 def test_airnow_state_code_is_sent():
     """Without stateCode the endpoint silently returns the wrong region."""
     _reset(state="WA"); _set_cfg(loc=[47.61, -122.33])   # Seattle — synthetic
-    with patch("utilities.air_quality.requests.post",
-               return_value=_airnow([{"parameter": "PM2.5", "aqi": 126, "dataType": "O"}])) as p, \
-         patch("utilities.air_quality.requests.get") as g:   # never hit the network
-        assert air_quality.get_aqi() == 126
-        g.assert_not_called()
-        d = p.call_args.kwargs["data"]
-        assert d["stateCode"] == "WA"
-        assert d["latitude"] == 47.61 and d["longitude"] == -122.33
+    got, p, g = _poll(
+        post={"return_value": _airnow([{"parameter": "PM2.5", "aqi": 126, "dataType": "O"}])},
+        get={})                                          # never hit the network
+    assert got == 126
+    g.assert_not_called()
+    d = p.call_args.kwargs["data"]
+    assert d["stateCode"] == "WA"
+    assert d["latitude"] == 47.61 and d["longitude"] == -122.33
 
 
 def test_aqi_zero_is_a_real_value_not_a_fallthrough():
     """Clean air reads 0. A `if not val:` check would discard it and fall back to
     the deliberately-demoted modelled source."""
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.post",
-               return_value=_airnow([{"parameter": "PM2.5", "aqi": 0, "dataType": "O"}])), \
-         patch("utilities.air_quality.requests.get") as g:
-        assert air_quality.get_aqi() == 0
-        g.assert_not_called()          # 0 is valid — must NOT fall through
+    got, _p, g = _poll(
+        post={"return_value": _airnow([{"parameter": "PM2.5", "aqi": 0, "dataType": "O"}])},
+        get={})
+    assert got == 0
+    g.assert_not_called()              # 0 is valid — must NOT fall through
 
 
 # ── Open-Meteo fallback ─────────────────────────────────────────────────────
 
 def test_falls_back_to_openmeteo_when_airnow_errors():
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.post", side_effect=Exception("boom")), \
-         patch("utilities.air_quality.requests.get", return_value=_om(78)) as g:
-        assert air_quality.get_aqi() == 78
-        g.assert_called_once()
+    got, _p, g = _poll(post={"side_effect": Exception("boom")},
+                       get={"return_value": _om(78)})
+    assert got == 78
+    g.assert_called_once()
 
 
 def test_falls_back_to_openmeteo_when_airnow_has_no_observed():
     """Forecast-only response (no dataType 'O') must fall through, not return 185."""
     _reset(); _set_cfg()
     entries = [{"parameter": "PM2.5", "aqi": 185, "dataType": "F"}]
-    with patch("utilities.air_quality.requests.post", return_value=_airnow(entries)), \
-         patch("utilities.air_quality.requests.get", return_value=_om(78)):
-        assert air_quality.get_aqi() == 78
+    got, _p, _g = _poll(post={"return_value": _airnow(entries)},
+                        get={"return_value": _om(78)})
+    assert got == 78
 
 
 def test_no_state_skips_airnow_and_uses_openmeteo():
     _reset(state=""); _set_cfg()
-    with patch("utilities.air_quality.requests.post") as p, \
-         patch("utilities.air_quality.requests.get", return_value=_om(64)):
-        assert air_quality.get_aqi() == 64
-        p.assert_not_called()          # don't call AirNow without a state code
+    got, p, _g = _poll(post={}, get={"return_value": _om(64)})
+    assert got == 64
+    p.assert_not_called()              # don't call AirNow without a state code
 
 
 def test_both_sources_down_returns_none():
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.post", side_effect=Exception("x")), \
-         patch("utilities.air_quality.requests.get", side_effect=Exception("y")):
-        assert air_quality.get_aqi() is None
+    got, _p, _g = _poll(post={"side_effect": Exception("x")},
+                        get={"side_effect": Exception("y")})
+    assert got is None
+
+
+def test_getter_never_blocks_on_a_hanging_source():
+    """The conversion's whole point: a hung AirNow/Open-Meteo must not stall the
+    1 Hz temperature scene. The getter serves the last good value meanwhile."""
+    _reset(); _set_cfg()
+    got, _p, _g = _poll(
+        post={"return_value": _airnow([{"parameter": "PM2.5", "aqi": 42, "dataType": "O"}])},
+        get={})
+    assert got == 42
+
+    release = threading.Event()
+
+    def hang(*a, **kw):
+        release.wait(10)
+        return _airnow([{"parameter": "PM2.5", "aqi": 99, "dataType": "O"}])
+
+    air_quality._cached_ts = 1.0       # force the poll interval to have elapsed
+    with patch("utilities.air_quality.requests.post", side_effect=hang), \
+         patch("utilities.air_quality.requests.get"):
+        t0 = time.monotonic()
+        assert air_quality.get_aqi() == 42          # last good, immediately
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.5, f"getter blocked for {elapsed:.2f}s"
+        release.set()
+        settle(air_quality)
+        assert air_quality.get_aqi() == 99          # landed asynchronously
+
+
+def test_only_one_refresh_in_flight():
+    """A second dispatch while one is running would stack threads on a 512MB Pi.
+    The blocked call must also NOT consume the poll gate."""
+    _reset(); _set_cfg()
+    release = threading.Event()
+    calls = []
+
+    def hang(*a, **kw):
+        calls.append(1)
+        release.wait(10)
+        return _airnow([{"parameter": "PM2.5", "aqi": 55, "dataType": "O"}])
+
+    with patch("utilities.air_quality.requests.post", side_effect=hang), \
+         patch("utilities.air_quality.requests.get"):
+        air_quality.get_aqi()                       # dispatches the one worker
+        for _ in range(3):
+            air_quality._cached_ts = 1.0            # gate wide open again
+            assert air_quality.get_aqi() is None    # nothing cached yet
+            assert air_quality._cached_ts == 1.0    # gate NOT consumed while in flight
+        release.set()
+        settle(air_quality)
+    assert calls == [1]                             # exactly one fetch happened
 
 
 # ── gating ──────────────────────────────────────────────────────────────────
@@ -157,26 +225,32 @@ def test_no_location_makes_no_call():
 
 def test_failure_keeps_last_good_and_gates_retry():
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.post",
-               return_value=_airnow([{"parameter": "PM2.5", "aqi": 80, "dataType": "O"}])):
-        assert air_quality.get_aqi() == 80
+    got, _p, _g = _poll(
+        post={"return_value": _airnow([{"parameter": "PM2.5", "aqi": 80, "dataType": "O"}])},
+        get={})
+    assert got == 80
     air_quality._cached_ts = 1.0                     # force the interval to elapse
     with patch("utilities.air_quality.requests.post", side_effect=Exception("boom")) as p, \
          patch("utilities.air_quality.requests.get", side_effect=Exception("boom")):
         assert air_quality.get_aqi() == 80           # last good (still fresh) kept
+        settle(air_quality)
         p.assert_called_once()
         assert air_quality._cached_ts > 1.0          # ts advanced (anti-hammer)
+        assert air_quality.get_aqi() == 80           # failure kept the last good
+        p.assert_called_once()                       # and did not re-hammer
 
 
 def test_stale_value_is_hidden():
     _reset(); _set_cfg()
-    with patch("utilities.air_quality.requests.post",
-               return_value=_airnow([{"parameter": "PM2.5", "aqi": 80, "dataType": "O"}])):
-        assert air_quality.get_aqi() == 80
+    got, _p, _g = _poll(
+        post={"return_value": _airnow([{"parameter": "PM2.5", "aqi": 80, "dataType": "O"}])},
+        get={})
+    assert got == 80
     air_quality._value_ts = time.time() - air_quality._MAX_AGE - 100
     with patch("utilities.air_quality.requests.post", side_effect=Exception("boom")), \
          patch("utilities.air_quality.requests.get", side_effect=Exception("boom")):
         assert air_quality.get_aqi() is None         # stale -> hidden
+        settle(air_quality)
 
 
 def test_stale_disk_cache_not_resurrected_on_cold_start():
@@ -184,12 +258,15 @@ def test_stale_disk_cache_not_resurrected_on_cold_start():
     air_quality._cached_ts = 0.0
     air_quality._value_ts = 0.0
     air_quality._state = "CO"
+    air_quality._refresh_pending = False
     with open(air_quality._CACHE_FILE, "w") as f:
         json.dump({"aqi": 300, "ts": time.time() - air_quality._MAX_AGE - 100}, f)
     _set_cfg()
     with patch("utilities.air_quality.requests.post", side_effect=Exception("x")), \
          patch("utilities.air_quality.requests.get", side_effect=Exception("y")):
         assert air_quality.get_aqi() is None         # ancient value not resurrected
+        settle(air_quality)
+        assert air_quality.get_aqi() is None         # and the failed poll adds none
 
 
 # ── home-state resolution ───────────────────────────────────────────────────

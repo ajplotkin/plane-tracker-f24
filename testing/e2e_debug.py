@@ -34,6 +34,38 @@ import fake_rgbmatrix
 fake_rgbmatrix.install()
 RECORDER = fake_rgbmatrix.RECORDER
 
+# ---- virtual clock: wall time advances with the frame counter ----------------
+# Some of what the app draws is driven by the REAL wall clock, most visibly the
+# ISS badge blink in scenes/flightdetails.py: its phase is int(time.time()//2)%2,
+# deliberately wall-clock-derived so the browser mirror (which blinks on
+# floor(serverNow()/2)%2) stays in lockstep instead of drifting to anti-phase.
+# This harness replays frames back-to-back with no sleeping, so a whole
+# 1500-frame scenario takes well under a second of real time: every frame lands
+# inside the SAME 2 s blink phase, and any assertion about the blink passes or
+# fails purely on what time of day the run started (isscameo's badge check
+# alternated pass/fail across back-to-back runs).
+#
+# So the harness supplies the wall time the replay skips: the clock the app
+# reads advances one frame period per replayed frame, exactly as it does on the
+# device. 1500 frames == 150 virtual seconds, so every wall-clock cycle shorter
+# than the scenario is exercised — both blink faces, always. The base is floored
+# to an even second so frame 0 starts in phase 0, making runs reproducible
+# rather than merely non-flaky, and it tracks the real date so cache TTLs and
+# datetime.now() (not patched — it does not read time.time()) stay consistent.
+import time as _time_module  # noqa: E402
+from setup import frames as _frames  # noqa: E402 (setup/frames.py: PERIOD = 0.1)
+
+VCLOCK = {"frame": 0}  # run_frames() keeps this in step with Animator.frame
+_VCLOCK_BASE = (int(_time_module.time()) // 2) * 2.0
+
+
+def virtual_time():
+    """time.time() as the app sees it: frame N is base + N * PERIOD."""
+    return _VCLOCK_BASE + VCLOCK["frame"] * _frames.PERIOD
+
+
+_time_module.time = virtual_time
+
 # ---- stub network-facing modules BEFORE importing display -------------------
 import types
 
@@ -153,6 +185,7 @@ def run_frames(d, n, hook=None):
     """Replicates Animator.play() exactly, bounded, no sleep."""
     for _ in range(n):
         RECORDER.frame = d.frame
+        VCLOCK["frame"] = d.frame  # virtual wall clock tracks the frame counter
         if hook:
             hook(d)
         for keyframe in d.keyframes:

@@ -101,14 +101,27 @@ class ClockScene(object):
 
         try:
             if self.last_fetch_date != now.date():
-                if datetime.now(timezone.utc).timestamp() < self._forecast_retry_after:
+                # The retry gate applies only while we still have yesterday's
+                # times to fall back on. With NOTHING cached the clock draws RED,
+                # and grab_forecast() is non-blocking and self-gated now, so
+                # sitting out a 5-minute gate would mean a red clock for five
+                # minutes after the background fetch had already landed.
+                have_last_known = (self.today_sunrise is not None
+                                   and self.today_sunset is not None)
+                if (have_last_known
+                        and datetime.now(timezone.utc).timestamp() < self._forecast_retry_after):
                     return self.today_sunrise, self.today_sunset
 
                 forecast = grab_forecast(tag="ClockScene")
                 if not forecast:
                     logging.error("Forecast data missing or API error.")
                     self._forecast_retry_after = datetime.now(timezone.utc).timestamp() + 300
-                    return None, None
+                    # Return the LAST KNOWN times (matching the gate-hit branch
+                    # above), not None. Sunrise/sunset move ~1 min/day, so one
+                    # more tick on yesterday's is right; returning None turned
+                    # the clock RED and back on the date rollover — a
+                    # value -> None -> value flap on a live framebuffer.
+                    return self.today_sunrise, self.today_sunset
 
                 for day in forecast:
                     forecast_date = day['startTime'][:10]
@@ -133,8 +146,12 @@ class ClockScene(object):
                             pass
 
         except Exception as e:
+            # Same reasoning as the empty-forecast branch: fall back to the last
+            # known times rather than None, which would turn the clock RED for a
+            # frame and back. (Both are None before the very first fetch, which
+            # is the one case RED is the right answer.)
             logging.error(f"Error fetching forecast: {e}")
-            return None, None
+            return self.today_sunrise, self.today_sunset
 
         return self.today_sunrise, self.today_sunset
 

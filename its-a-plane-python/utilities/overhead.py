@@ -55,6 +55,7 @@ from config import (
 )
 
 from setup import email_alerts
+from utilities.cpu_affinity import run_off_render_core
 
 # Lazy imports — folium (used by map_generator) may not be installed in test envs
 map_generator = None
@@ -681,6 +682,7 @@ class Overhead:
 
     @staticmethod
     def _preload_cities():
+        run_off_render_core()   # keep off the LED refresh core
         try:
             from utilities.cities import _load
             _load()
@@ -689,6 +691,7 @@ class Overhead:
 
     @staticmethod
     def _preload_parks():
+        run_off_render_core()   # keep off the LED refresh core
         try:
             from utilities.landmarks import _load_parks
             _load_parks()
@@ -796,6 +799,7 @@ class Overhead:
         return d if d is not None else default
 
     def _grab(self):
+        run_off_render_core()   # keep off the LED refresh core
         with self._lock:
             self._new_data = False
 

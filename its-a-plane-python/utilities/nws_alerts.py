@@ -19,6 +19,7 @@ import threading
 import time
 
 import requests
+from utilities.cpu_affinity import run_off_render_core
 
 try:
     from utilities.api_usage import log_call as _log_api
@@ -258,6 +259,7 @@ def _background_fetch(lat, lon):
     global _cached_alerts, _cached_ts, _refresh_pending
     with _refresh_lock:
         try:
+            run_off_render_core()   # inside try: must never wedge the flag
             features = _fetch(lat, lon)
             if features is not None:
                 _cached_alerts = features

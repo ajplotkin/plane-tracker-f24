@@ -30,9 +30,11 @@ Usage:
 """
 import logging
 import os
+import threading
 import time
 
 import requests
+from utilities.cpu_affinity import run_off_render_core
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,14 @@ _value_ts = 0.0      # when _cached_aqi was last SUCCESSFULLY fetched (freshness
 _state = ""          # resolved 2-letter home state code ("" = not resolved yet)
 _state_loc = None    # the location _state was resolved FOR (invalidates on move)
 _state_try_ts = 0.0  # last state-lookup attempt (backs off after a failure)
+_refresh_lock = threading.Lock()
+# NOTE: the check-then-set of _refresh_pending in the getters is deliberately
+# NOT lock-protected. It is safe only because every getter here has exactly ONE
+# caller thread: Animator.play() runs all scenes sequentially in one loop, and
+# the web mirror is a SEPARATE PROCESS. If a second caller thread is ever added,
+# two workers could briefly overlap (serialized by _refresh_lock, so bounded at
+# 2 -- not unbounded growth), but the "one in-flight" invariant becomes soft.
+_refresh_pending = False   # one in-flight refresh at a time
 
 
 def _load_cache():
@@ -155,16 +165,59 @@ def _fetch_openmeteo(loc):
     return None
 
 
+def _background_fetch(loc):
+    """Resolve the state (if needed) and fetch the AQI in a background thread, so
+    the render thread never waits on AirNow / Open-Meteo / Nominatim."""
+    global _cached_aqi, _value_ts, _refresh_pending
+    with _refresh_lock:
+        try:
+            run_off_render_core()   # inside try: must never wedge the flag
+            val, src = None, None
+            state = _home_state(loc)
+            if state:
+                try:
+                    val = _fetch_airnow(loc, state)
+                    src = "AirNow %s" % state
+                except Exception as e:
+                    logger.error(f"[AQI] AirNow fetch failed: {e}")
+            if val is None:                        # unreachable, no data, or no state
+                try:
+                    val = _fetch_openmeteo(loc)
+                    src = "Open-Meteo"
+                except Exception as e:
+                    logger.error(f"[AQI] Open-Meteo fetch failed: {e}")
+
+            if val is not None:
+                now = time.time()
+                _cached_aqi = val
+                _value_ts = now   # mark this value fresh (last successful fetch)
+                try:
+                    import json
+                    os.makedirs(_CACHE_DIR, exist_ok=True)
+                    tmp = f"{_CACHE_FILE}.tmp.{os.getpid()}"
+                    with open(tmp, "w") as f:
+                        json.dump({"aqi": _cached_aqi, "ts": now}, f)
+                    os.replace(tmp, _CACHE_FILE)
+                except Exception as e:
+                    logger.error(f"[AQI] cache write failed: {e}")
+                logger.info("[AQI] %s (%s)", _cached_aqi, src)
+        finally:
+            _refresh_pending = False
+
+
 def get_aqi():
     """Current US EPA AQI (int 0-500) for the home location, or None.
 
     Config is read at CALL TIME (so enabling it in the web config page takes
     effect without a restart). Gated to one poll per _POLL_INTERVAL, and the
-    timestamp is advanced BEFORE the blocking calls so an unreachable source
-    can't drive a request every second on the 1 Hz render thread. On failure the
-    last good value is kept, until it ages past _MAX_AGE.
+    timestamp is advanced BEFORE the fetch is dispatched so an unreachable source
+    can't drive a request every second. On failure the last good value is kept,
+    until it ages past _MAX_AGE.
+
+    NEVER blocks on the network: a stale cache dispatches a background refresh and
+    this returns the last good value immediately (None until the first fetch lands).
     """
-    global _cached_aqi, _cached_ts, _value_ts
+    global _cached_aqi, _cached_ts, _value_ts, _refresh_pending
 
     import config as cfg
     if not getattr(cfg, "AQI_ALERTS_ENABLED", False):
@@ -184,36 +237,16 @@ def get_aqi():
     fresh = _cached_aqi is not None and (now - _value_ts) < _MAX_AGE
     if (now - _cached_ts) < _POLL_INTERVAL:
         return _cached_aqi if fresh else None
-    _cached_ts = now   # advance BEFORE the blocking calls (anti-hammer)
-
-    val, src = None, None
-    state = _home_state(loc)
-    if state:
+    if not _refresh_pending:
+        prev_ts = _cached_ts
+        _cached_ts = now   # advance BEFORE dispatch (anti-hammer)
+        _refresh_pending = True
         try:
-            val = _fetch_airnow(loc, state)
-            src = "AirNow %s" % state
-        except Exception as e:
-            logger.error(f"[AQI] AirNow fetch failed: {e}")
-    if val is None:                        # unreachable, no data, or no state
-        try:
-            val = _fetch_openmeteo(loc)
-            src = "Open-Meteo"
-        except Exception as e:
-            logger.error(f"[AQI] Open-Meteo fetch failed: {e}")
-
-    if val is not None:
-        _cached_aqi = val
-        _value_ts = now   # mark this value fresh (last successful fetch)
-        try:
-            import json
-            os.makedirs(_CACHE_DIR, exist_ok=True)
-            tmp = f"{_CACHE_FILE}.tmp.{os.getpid()}"
-            with open(tmp, "w") as f:
-                json.dump({"aqi": _cached_aqi, "ts": now}, f)
-            os.replace(tmp, _CACHE_FILE)
-        except Exception as e:
-            logger.error(f"[AQI] cache write failed: {e}")
-        logger.info("[AQI] %s (%s)", _cached_aqi, src)
+            threading.Thread(target=_background_fetch, args=(loc,), daemon=True).start()
+        except Exception:
+            # start() failed (OOM) — undo the gate so the next call retries.
+            _refresh_pending = False
+            _cached_ts = prev_ts
 
     # A value we haven't managed to refresh within _MAX_AGE is stale — hide it
     # rather than show a wrong reading indefinitely while fetches keep failing.

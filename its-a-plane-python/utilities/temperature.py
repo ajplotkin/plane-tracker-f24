@@ -3,8 +3,23 @@ Tomorrow.io weather API wrapper with built-in rate limiting.
 
 Free tier: 25 requests/hour (one every ~2.4 minutes).
 We enforce a minimum 3-minute gap between ALL API calls to stay safe.
+
+NON-BLOCKING CONTRACT (2026-08-16)
+----------------------------------
+Every public getter here — grab_temperature_and_humidity(), grab_forecast(),
+get_uv_index(), get_current_uv() — returns the LAST GOOD value immediately and
+never touches the network on the calling thread. Both HTTP calls (a GET with a
+(5, 20) timeout and a POST with the same, each behind a urllib3 Retry that can
+stretch a bad round-trip well past a minute) used to run on the 10 FPS render
+thread, so any slow round-trip was a visible scroll freeze. They now run in a
+background worker; the getters only decide whether to dispatch one.
+
+Same shape as airport_status.py / rain.py / tides.py: module-level _refresh_lock + _refresh_pending, a
+_dispatch() helper, a _background_* worker that calls run_off_render_core()
+first and clears the pending flag in a finally.
 """
 from datetime import datetime, timedelta
+import sys
 import time
 import logging
 import socket
@@ -14,6 +29,7 @@ from requests import Session
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 from urllib3.util.retry import Retry
+from utilities.cpu_affinity import run_off_render_core
 import gc as _gc
 import ctypes as _ctypes
 
@@ -51,6 +67,21 @@ if TEMPERATURE_UNITS not in ("metric", "imperial"):
     TEMPERATURE_UNITS = "metric"
 
 logger = logging.getLogger(__name__)
+
+_warned = set()
+
+
+def _warn_once(key, msg):
+    """Log a config-problem warning once per process.
+
+    These getters are now polled EVERY FRAME while nothing is cached (the scenes
+    stopped gating on a retry timer so async data is never stranded), so an
+    unconfigured key would otherwise emit ~3 warnings/sec — ~260k journald lines a
+    day on a device that was simply deployed before its key was entered.
+    """
+    if key not in _warned:
+        _warned.add(key)
+        logger.warning(msg)
 
 # ─── Rate Limiter ────────────────────────────────────────────────────────────
 # Separate rate limiters for temperature and forecast so they don't block each other.
@@ -111,6 +142,66 @@ def _exit_backoff():
         if _in_backoff:
             _in_backoff = False
             logger.info("Tomorrow.io: backoff cleared, resuming normal interval")
+
+
+# ─── Background refresh plumbing ─────────────────────────────────────────────
+# ONE in-flight worker for the WHOLE module — the realtime (temp/humidity/UV)
+# and forecast fetches share the slot, like tides.py does for
+# their two getters each. Justification:
+#   * They hit the SAME host through the SAME Session (pool_maxsize=2), and the
+#     free tier's 25 req/hour is an ACCOUNT limit, not a per-endpoint one — so
+#     running them concurrently buys no throughput, it only widens the peak.
+#   * Their poll intervals are 900 s (forecast TTL) / 3600 s (realtime TTL) with
+#     a 1800 s per-endpoint rate limit on top, while a worker lives seconds. The
+#     odds of them wanting the slot in the same instant are negligible, and when
+#     it happens the loser returns its last-good value WITHOUT consuming its
+#     dispatch gate and simply re-tries on the next render frame (≤ 1 s later).
+#   * On the 512MB Pi this bounds the module to one TLS handshake + one JSON
+#     parse at a time — the very allocation burst _trim_memory() exists to mop
+#     up. Two at once is exactly the peak that made RSS ratchet.
+#   * UV needs no slot of its own: get_uv_index() reads the realtime tuple and
+#     get_current_uv() interpolates the hourly curve that rides the forecast
+#     call. Neither ever fetches.
+_refresh_lock = threading.Lock()
+# NOTE: the check-then-set of _refresh_pending in the getters is deliberately
+# NOT lock-protected. It is safe only because every getter here has exactly ONE
+# caller thread: Animator.play() runs all scenes sequentially in one loop, and
+# the web mirror is a SEPARATE PROCESS (and only calls get_current_uv(), which
+# never dispatches). If a second caller thread is ever added, two workers could
+# briefly overlap (serialized by _refresh_lock, so bounded at 2 -- not unbounded
+# growth), but the "one in-flight" invariant becomes soft.
+_refresh_pending = False
+
+# Dispatch gates — SEPARATE from the rate limiter above, and needed because of
+# it. _record_call() fires only when Tomorrow.io actually ANSWERED (200 or 429);
+# a DNS failure / connect timeout deliberately leaves it alone so a transient
+# outage doesn't burn a 30-minute slot. That was safe while the fetch blocked
+# (the caller waited out the timeout), but a getter that returns instantly and
+# is called at 1 Hz by the render loop would re-dispatch a worker on EVERY frame
+# for as long as the network is down. These timestamps are advanced BEFORE the
+# dispatch (and restored if Thread.start() fails), which bounds a failing
+# endpoint to one attempt per _DISPATCH_RETRY_S. Same fix as rain.py/tides.py.
+_DISPATCH_RETRY_S = 300     # 5 min between dispatch attempts that never answered
+_temp_dispatch_ts = 0.0
+_fc_dispatch_ts = 0.0
+
+
+def _dispatch(target, args):
+    """Start a background worker if none is in flight. Returns True if it started.
+
+    Mirrors airport_status.py: the pending flag is cleared again if Thread.start()
+    itself fails (OOM on the 512MB Pi) so the module can never wedge.
+    """
+    global _refresh_pending
+    if _refresh_pending:
+        return False
+    _refresh_pending = True
+    try:
+        threading.Thread(target=target, args=args, daemon=True).start()
+        return True
+    except Exception:
+        _refresh_pending = False   # start() failed (OOM) — retry next call
+        return False
 
 
 # ─── DNS helper ──────────────────────────────────────────────────────────────
@@ -232,25 +323,23 @@ if _startup_temp and (time.time() - _startup_temp_ts) < _TEMP_CACHE_TTL * 2:
     logger.info(f"Loaded cached temperature from file: {_cached_temp}")
 
 
-def grab_temperature_and_humidity():
-    """
-    Fetch current temperature and humidity.
-    Returns cached data if called within the cache TTL or rate limit window.
+def _last_good_temp():
+    """The last good (temperature, humidity), or (None, None) if never fetched."""
+    return (_cached_temp[0], _cached_temp[1]) if _cached_temp else (None, None)
+
+
+def _fetch_temperature():
+    """The blocking realtime fetch. Runs ONLY on a background worker thread.
+
+    Byte-for-byte the old synchronous body of grab_temperature_and_humidity()
+    below the rate-limit check, with the `return cached` lines replaced by bare
+    returns — the caller now reads the module cache directly. Every semantic is
+    preserved: 429 records the call and enters backoff (without clobbering the
+    cache), a good response records the call, clears backoff, logs API usage,
+    writes the disk cache and trims malloc arenas, and a network error leaves
+    backoff alone for the 2-hour auto-clear.
     """
     global _cached_temp, _cached_temp_ts
-
-    if not TOMORROW_API_KEY:
-        logger.warning("TOMORROW_API_KEY not set — skipping temperature fetch")
-        return None, None
-
-    # Return cache if still fresh
-    if _cached_temp and (time.time() - _cached_temp_ts) < _TEMP_CACHE_TTL:
-        return _cached_temp[0], _cached_temp[1]
-
-    # Rate limit check
-    if _rate_limited("temp"):
-        logger.debug("Rate limit: skipping temperature API call, using cache")
-        return (_cached_temp[0], _cached_temp[1]) if _cached_temp else (None, None)
 
     try:
         s = get_session()
@@ -267,7 +356,7 @@ def grab_temperature_and_humidity():
         if request.status_code == 429:
             _record_call("temp")
             _enter_backoff()
-            return (_cached_temp[0], _cached_temp[1]) if _cached_temp else (None, None)
+            return
 
         request.raise_for_status()
         _record_call("temp")
@@ -281,13 +370,12 @@ def grab_temperature_and_humidity():
 
         if temperature is None or humidity is None:
             logger.error("Incomplete data from Tomorrow.io API")
-            return (_cached_temp[0], _cached_temp[1]) if _cached_temp else (None, None)
+            return
 
         _cached_temp = (temperature, humidity, uv_index)
         _cached_temp_ts = time.time()
         _save_file_cache(_TEMP_CACHE_FILE, [temperature, humidity, uv_index], units=TEMPERATURE_UNITS)
         _trim_memory()
-        return temperature, humidity
 
     except (RequestException, ValueError) as e:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -301,7 +389,54 @@ def grab_temperature_and_humidity():
                 f"[{timestamp}] Temperature request failed: {e}"
             )
 
-        return (_cached_temp[0], _cached_temp[1]) if _cached_temp else (None, None)
+
+def _background_temperature():
+    """Realtime fetch on a background thread so the render loop never waits."""
+    global _refresh_pending
+    with _refresh_lock:
+        try:
+            run_off_render_core()   # inside try: must never wedge _refresh_pending
+            _fetch_temperature()
+        finally:
+            _refresh_pending = False
+
+
+def grab_temperature_and_humidity():
+    """
+    Return the current (temperature, humidity), or (None, None) before the first
+    successful fetch.
+
+    NEVER blocks on the network. A stale cache dispatches a background refresh
+    and this returns the last good pair immediately. The cache TTL and the
+    per-endpoint rate limiter are unchanged; the extra dispatch gate only bounds
+    how often a fetch that never got an answer may be re-attempted.
+    """
+    global _temp_dispatch_ts
+
+    if not TOMORROW_API_KEY:
+        _warn_once("temp_key", "TOMORROW_API_KEY not set — skipping temperature fetch")
+        return None, None
+
+    # Return cache if still fresh
+    if _cached_temp and (time.time() - _cached_temp_ts) < _TEMP_CACHE_TTL:
+        return _cached_temp[0], _cached_temp[1]
+
+    # Rate limit check
+    if _rate_limited("temp"):
+        logger.debug("Rate limit: skipping temperature API call, using cache")
+        return _last_good_temp()
+
+    now = time.time()
+    if (now - _temp_dispatch_ts) < _DISPATCH_RETRY_S:
+        return _last_good_temp()        # a recent attempt never answered
+    if _refresh_pending:
+        return _last_good_temp()        # in flight — gate NOT consumed
+
+    prev_ts = _temp_dispatch_ts
+    _temp_dispatch_ts = now             # advance BEFORE dispatch (anti-hammer)
+    if not _dispatch(_background_temperature, ()):
+        _temp_dispatch_ts = prev_ts     # start() failed — retry next call
+    return _last_good_temp()
 
 
 def get_uv_index():
@@ -317,8 +452,8 @@ _cached_forecast_ts = 0.0
 _FORECAST_CACHE_TTL = 900  # 15 min — refreshes the hourly UV curve 4x/hr so
 # get_current_uv() tracks Tomorrow.io's own model updates sooner instead of
 # leaning on interpolation between stale hourly points. Well within the free
-# tier (worst case, two devices sharing one key: 240 calls/day of 500 limit).
-# NOTE (2026-07-07): a Pi 3 A+ (512MB) showed swap pressure/display
+# tier (worst case, the shared lauri/mari key: 240 calls/day of 500 limit).
+# NOTE (2026-07-07): ernie (Pi 3 A+, 512MB) showed swap pressure/display
 # freezing the same day this shipped. Code review found no accumulation bug
 # in this code path — pending a full memory investigation on Friday.
 
@@ -428,25 +563,74 @@ def get_current_uv():
     return get_uv_index()
 
 
-def grab_forecast(tag="unknown"):
+def _warm_forecast_icons(intervals):
+    """Decode the weather icons THIS forecast references, on the worker thread.
+
+    scenes/daysforecast._icon_pixels() decodes lazily on first paint: PIL open +
+    LANCZOS thumbnail + a per-pixel tuple build, measured at 338 ms for the three
+    icons of a first forecast render — 3+ dropped frames on a 10 FPS render loop.
+    Warming them here moves that cost onto this worker, which is already off the
+    render core.
+
+    This runs AFTER the forecast has been cached (so a warm failure can never
+    cost us the fetch), which leaves a small race: the render thread can pick up
+    the new forecast and reach an icon before we have warmed it. That is not a
+    correctness problem — it is exactly the old behaviour, one decode on the
+    render thread — and it only costs the very first paint after a fetch, so in
+    the common case the warm wins and the paint is free.
+
+    There are 247 files in icons/, so this deliberately warms only the handful of
+    weatherCodeFullDay codes the forecast actually names.
+
+    THREAD SAFETY: _ICON_CACHE is a plain dict keyed by the icon code, and
+    _icon_pixels() is `if icon in cache: return cache[icon]` / build / assign.
+    The membership test and the store are single bytecodes against a builtin
+    dict with str/int keys — no Python-level __hash__/__eq__ that could yield the
+    GIL mid-operation — so no torn read is possible. The values are immutable
+    tuples (or None) built completely before assignment, so a reader either
+    misses the key and rebuilds it itself (a wasted decode, the worst case of the
+    race above) or gets a finished entry. No lock needed, and the scene needs no
+    change.
+
+    Best-effort in every direction: it only reaches into the scene module if that
+    module is ALREADY imported (`sys.modules`), so importing it here can never
+    drag rgbmatrix into the web-mirror process or create an import cycle with
+    scenes/daysforecast.py, and any failure is swallowed.
     """
-    Fetch daily forecast data.
-    Returns cached data if called within the cache TTL or rate limit window.
+    try:
+        scene = sys.modules.get("scenes.daysforecast")
+        if scene is None:
+            return                       # display process not running this scene
+        seen = set()
+        for day in intervals[:6]:        # the scene shows 3; a couple spare
+            try:
+                icon = day["values"]["weatherCodeFullDay"]
+            except (KeyError, TypeError):
+                continue
+            if icon in seen or icon in scene._ICON_CACHE:
+                continue
+            seen.add(icon)
+            scene._icon_pixels(icon)
+        if seen:
+            logger.debug(f"[Forecast] warmed {len(seen)} weather icon(s)")
+    except Exception as e:                # must NEVER break the fetch
+        logger.debug(f"[Forecast] icon warm skipped: {e}")
+
+
+def _last_good_forecast():
+    """The last good interval list, or [] if never fetched."""
+    return _cached_forecast if _cached_forecast else []
+
+
+def _fetch_forecast(tag):
+    """The blocking forecast fetch. Runs ONLY on a background worker thread.
+
+    The old synchronous body of grab_forecast() below the rate-limit check, with
+    the `return cached` lines replaced by bare returns. 429 handling, backoff,
+    API-usage logging, the hourly UV curve harvest, the disk cache write and the
+    malloc trim are all unchanged.
     """
     global _cached_forecast, _cached_forecast_ts
-
-    if not TOMORROW_API_KEY:
-        logger.warning("TOMORROW_API_KEY not set — skipping forecast fetch")
-        return []
-
-    # Return cache if still fresh
-    if _cached_forecast and (time.time() - _cached_forecast_ts) < _FORECAST_CACHE_TTL:
-        return _cached_forecast
-
-    # Rate limit check
-    if _rate_limited("forecast"):
-        logger.debug(f"[Forecast:{tag}] Rate limit: skipping API call, using cache")
-        return _cached_forecast if _cached_forecast else []
 
     dt = datetime.now()
 
@@ -487,7 +671,7 @@ def grab_forecast(tag="unknown"):
         if resp.status_code == 429:
             _record_call("forecast")
             _enter_backoff()
-            return _cached_forecast if _cached_forecast else []
+            return
 
         resp.raise_for_status()
         _record_call("forecast")
@@ -498,7 +682,7 @@ def grab_forecast(tag="unknown"):
         timelines = data.get("timelines", [])
         if not timelines:
             logger.error(f"[Forecast:{tag}] No timelines returned from API")
-            return _cached_forecast if _cached_forecast else []
+            return
 
         # Two timesteps now — find the daily one explicitly (response order is
         # not guaranteed) and harvest the hourly UV curve from the "1h" one.
@@ -507,13 +691,16 @@ def grab_forecast(tag="unknown"):
         intervals = (daily_tl or timelines[0]).get("intervals", [])
         if not intervals:
             logger.error(f"[Forecast:{tag}] Timelines returned but no intervals")
-            return _cached_forecast if _cached_forecast else []
+            return
 
         _cached_forecast = intervals
         _cached_forecast_ts = time.time()
         _save_file_cache(_FORECAST_CACHE_FILE, intervals, units=TEMPERATURE_UNITS)
+        # Decode this forecast's weather icons here rather than on the render
+        # thread's first paint (see _warm_forecast_icons). After the cache store,
+        # so a warm failure can never cost us the forecast.
+        _warm_forecast_icons(intervals)
         _trim_memory()
-        return intervals
 
     except RequestException as e:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -526,8 +713,54 @@ def grab_forecast(tag="unknown"):
             logger.error(
                 f"[{timestamp}] [Forecast:{tag}] API request failed: {e}"
             )
-        return _cached_forecast if _cached_forecast else []
 
     except KeyError as e:
         logger.error(f"[Forecast:{tag}] Unexpected data format: {e}")
-        return _cached_forecast if _cached_forecast else []
+
+
+def _background_forecast(tag):
+    """Forecast fetch on a background thread so the render loop never waits."""
+    global _refresh_pending
+    with _refresh_lock:
+        try:
+            run_off_render_core()   # inside try: must never wedge _refresh_pending
+            _fetch_forecast(tag)
+        finally:
+            _refresh_pending = False
+
+
+def grab_forecast(tag="unknown"):
+    """
+    Return the daily forecast intervals, or [] before the first successful fetch.
+
+    NEVER blocks on the network. A stale cache dispatches a background refresh
+    and this returns the last good list immediately. The returned shape is
+    unchanged (the raw Tomorrow.io "1d" intervals), as is the .cache/forecast.json
+    the web mirror reads.
+    """
+    global _fc_dispatch_ts
+
+    if not TOMORROW_API_KEY:
+        _warn_once("forecast_key", "TOMORROW_API_KEY not set — skipping forecast fetch")
+        return []
+
+    # Return cache if still fresh
+    if _cached_forecast and (time.time() - _cached_forecast_ts) < _FORECAST_CACHE_TTL:
+        return _cached_forecast
+
+    # Rate limit check
+    if _rate_limited("forecast"):
+        logger.debug(f"[Forecast:{tag}] Rate limit: skipping API call, using cache")
+        return _last_good_forecast()
+
+    now = time.time()
+    if (now - _fc_dispatch_ts) < _DISPATCH_RETRY_S:
+        return _last_good_forecast()    # a recent attempt never answered
+    if _refresh_pending:
+        return _last_good_forecast()    # in flight — gate NOT consumed
+
+    prev_ts = _fc_dispatch_ts
+    _fc_dispatch_ts = now               # advance BEFORE dispatch (anti-hammer)
+    if not _dispatch(_background_forecast, (tag,)):
+        _fc_dispatch_ts = prev_ts       # start() failed — retry next call
+    return _last_good_forecast()

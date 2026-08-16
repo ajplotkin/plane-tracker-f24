@@ -14,8 +14,35 @@ per-file `if "rgbmatrix" not in sys.modules` stubs (they see it already set and
 skip).
 """
 import sys
+import time
 import types
 from unittest.mock import MagicMock
+
+
+def settle(module, timeout=5.0):
+    """Wait for `module`'s background refresh (if one is in flight) to finish.
+
+    The non-blocking fetchers (air_quality, rain,
+    tides — same pattern as airport_status/nws_alerts/iss) dispatch a worker
+    thread and return the LAST GOOD value immediately, so a test that asserts on
+    a freshly fetched value has to wait for that worker.
+
+    `_refresh_pending` is cleared in the worker's `finally`, inside
+    `_refresh_lock` and after the module globals have been updated — so once it
+    reads False the refresh is complete and its results are visible. The lock is
+    then taken briefly to be sure the worker has actually exited it.
+
+    Always call this INSIDE the `with patch(...)` block that mocks requests,
+    otherwise the worker can outlive the patch and hit the real network.
+    """
+    deadline = time.monotonic() + timeout
+    while module._refresh_pending:
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"{module.__name__}: background refresh did not finish in {timeout}s")
+        time.sleep(0.001)
+    with module._refresh_lock:
+        pass
 
 
 class _Color:

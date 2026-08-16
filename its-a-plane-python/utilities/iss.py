@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timezone, timedelta
 
 import requests
+from utilities.cpu_affinity import run_off_render_core
 
 try:
     import ephem
@@ -255,6 +256,7 @@ def _background_compute(lat, lon):
     global _cached_passes, _cached_ts, _next_retry_after, _consecutive_failures, _refresh_pending
     with _refresh_lock:
         try:
+            run_off_render_core()   # inside try: must never wedge the flag
             passes = _compute_passes(lat, lon)
             now = time.time()
             if passes is not None:
