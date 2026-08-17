@@ -116,7 +116,7 @@ design, journey/logo/weather scenes, the ISS takeover concept, the AirLabs /
 route-lookup integrations, and his own local airport/airline handling (built
 independently — see note below). Everything here stands on this.
 
-**a10kiloham.** Official FR24 gRPC SDK integration (paid API), the caching
+**a10kiloham.** `fr24` gRPC client integration (paid API), the caching
 and rate-limiting architecture, systemd + `.env` + venv deployment with
 secrets hygiene, `/var/lib` data directory, triple-bonnet support, startup
 validation, one-command setup, and the first web pages (closest/farthest
@@ -232,7 +232,7 @@ This project is a chain of forks; everything here stands on the work below.
   [paypal.me/c0wsaysmoo](https://paypal.me/c0wsaysmoo) and is on Reddit as
   [Mediocre-Opposite225](https://old.reddit.com/user/Mediocre-Opposite225/).
 - **[a10kiloham](https://github.com/a10kiloham/plane-tracker-rgb-pi)** — the
-  re-architecture this fork builds on: official FR24 gRPC SDK, the caching and
+  re-architecture this fork builds on: the `fr24` gRPC client, the caching and
   rate-limiting layer, systemd + venv + `.env` deployment with secrets hygiene,
   the `/var/lib` data directory, triple-bonnet support, and the first web maps.
 - **This fork (ajplotkin)** — see [What this fork adds](#what-this-fork-adds)
@@ -257,7 +257,15 @@ tagged **ajplotkin** originated in this fork and were merged into a1k's repo.
 
 | Feature | c0wsaysmoo (original) | a10kiloham re-architecture | Origin |
 |---------|----------------------|----------------------|--------|
-| **FR24 API** | Unofficial `FlightRadarAPI` pip package (web scraping) | Official `fr24` gRPC SDK (v0.3.0+, paid subscription) | a10kiloham |
+| **FR24 API** | `FlightRadarAPI` pip package (web scraping) | `fr24` gRPC client (v0.3.0+, paid subscription) | a10kiloham |
+
+> **On "official":** neither FR24 client is official. Flightradar24 publishes only a
+> REST API and REST SDKs (`fr24sdk` / `@flightradar24/fr24sdk`); there is no official
+> gRPC SDK. The `fr24` package used here is a community, reverse-engineered gRPC
+> client by abc8747 and xoolive that targets FR24's internal endpoints — more robust
+> than HTML scraping, but still unofficial and subject to breaking when FR24 changes
+> those endpoints. Earlier revisions of this README called it "official"; that was
+> wrong.
 | **FR24 Feed Caching** | None — polls API every cycle | 90-second polling interval with TTL cache | a10kiloham |
 | **FR24 Flight Detail Cache** | None — fetches details on every pass | 30-minute per-flight cache (checks cache first) | a10kiloham |
 | **Weather API Rate Limiting** | None — can exhaust free tier quickly | 1 call/hour max, 1-hour backoff on HTTP 429 | a10kiloham |
@@ -458,7 +466,7 @@ This is what I used to make mine. Other than the Pi and the Bonnet you can use w
 > **Heads up (this fork):** steps 1–6 below (Pi OS, bonnet, RGB-matrix bindings)
 > are current and apply as-is. Steps 7–10 are c0wsaysmoo's **original** app
 > setup — the unofficial `FlightRadarAPI` package and `crontab @reboot`. This
-> fork uses a10kiloham's deployment instead (official `fr24` SDK, virtualenv,
+> fork uses a10kiloham's deployment instead (the `fr24` gRPC client, virtualenv,
 > systemd) via `its-a-plane-python/setup/update-pi.sh`; run that in place of
 > steps 7–10, then apply the [ATC/audio delta](#installation-delta-over-a10kilohams-process).
 
