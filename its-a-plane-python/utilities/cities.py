@@ -297,9 +297,28 @@ def get_nearest_city(latitude, longitude):
 
 
 def refresh():
-    """Force re-download of cities database."""
-    global _loaded
-    _loaded = False
-    if os.path.exists(CACHE_FILE):
-        os.remove(CACHE_FILE)
+    """Force re-download of cities database.
+
+    Unlinking needs write permission on the DIRECTORY, which the daemon user the
+    app drops to does not have (cities.json's own 0666 mode is irrelevant to
+    unlink -- the same trap that stopped airports.py rebuilding its cache). So
+    the remove is tolerated, and if it fails we rebuild straight from the network
+    rather than calling _load(), which would just re-read the surviving cache and
+    make refresh() a no-op.
+    """
+    global _db, _loaded
+    removed = True
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+    except OSError as e:
+        removed = False
+        print(f"[Cities] Could not delete cache: {e} — rebuilding from network")
+
+    with _load_lock:          # _loaded was previously written unsynchronised
+        _loaded = False
+        if not removed:
+            _db = _download_and_build()
+            _loaded = True
+            return
     _load()

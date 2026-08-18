@@ -39,7 +39,14 @@ PARKS_CACHE = os.path.join(BASE_DIR, "nationalparks.json")
 NPS_API_URL = "https://developer.nps.gov/api/v1/parks"
 PARKS_RADIUS_KM = 30  # Only show park name if plane is within this distance
 REQUERY_AFTER_KM = 15  # Re-query Nominatim after this much movement
-MAX_NAME_LEN = 24  # Truncate display names to fit LED matrix
+# Cap on a rendered place name. The stats line SCROLLS, so this is not about
+# fitting the panel -- nothing is clipped -- it bounds how long one name holds
+# the scroll before it comes round again. Measured over the 69,629-city
+# database: median name is 8 chars, p90 15, p99 24, but the tail runs to 97
+# ("United Townships of Dysart, Dudley, Harcourt, ..." in Ontario), so a cap is
+# needed. 28 sits just past p99 and keeps the suffix on names like
+# "Saint-Jean-sur-Richelieu, QC" that 24 truncated away.
+MAX_NAME_LEN = 28
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 _NOM_HEADERS = {"User-Agent": "plane-tracker-rgb-pi/1.0"}
@@ -124,9 +131,7 @@ def _country_name(country_code):
     name = _COUNTRY_NAMES.get(country_code.lower())
     if not name:
         return None
-    if len(name) <= MAX_NAME_LEN:
-        return name
-    return name[:MAX_NAME_LEN].rstrip()
+    return _truncate_name(name)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +154,13 @@ _OCEAN_REGIONS = [
     ("North Sea",           (51, 62,  -4,  13)),
     ("Baltic Sea",          (53, 66,  10,  30)),
     ("Black Sea",           (41, 47,  28,  42)),
+    # The Caspian is the one large lake that reaches this code. Nominatim
+    # returns "Unable to geocode" mid-Caspian (international water, no admin
+    # polygon covering it), which _over_water() reads as open sea -- and the
+    # basin fallback then called it the Indian Ocean, ~1500km away. Superior,
+    # Baikal, Victoria and Great Bear all sit inside national polygons, so
+    # Nominatim names a country for them and they never get here.
+    ("Caspian Sea",         (36, 47,  46,  55)),
     ("Red Sea",             (12, 30,  32,  44)),
     ("Persian Gulf",        (22, 30,  47,  57)),
     ("Arabian Sea",         (5,  26,  52,  78)),
@@ -238,7 +250,17 @@ _STATE_ABBR = {
     "New Hampshire": "NH", "Maine": "ME", "Rhode Island": "RI",
     "Delaware": "DE", "Maryland": "MD", "Alaska": "AK", "Hawaii": "HI",
     "Kansas": "KS", "Nebraska": "NE", "South Dakota": "SD",
-    "North Dakota": "ND", "Oklahoma": "OK",
+    "North Dakota": "ND", "Oklahoma": "OK", "District of Columbia": "DC",
+    # Canadian provinces. Nominatim has returned ISO3166-2-lvl4 ("CA-ON") for
+    # every Canadian position tested, including remote Nunavut, so this branch
+    # should never be needed -- but it cost nothing and the table was US-only.
+    # Quebec is listed under both spellings because Nominatim answers "Quebec"
+    # here with the accented form.
+    "Alberta": "AB", "British Columbia": "BC", "Manitoba": "MB",
+    "New Brunswick": "NB", "Newfoundland and Labrador": "NL",
+    "Nova Scotia": "NS", "Ontario": "ON", "Prince Edward Island": "PE",
+    "Quebec": "QC", "Qu\u00e9bec": "QC", "Saskatchewan": "SK", "Yukon": "YT",
+    "Northwest Territories": "NT", "Nunavut": "NU",
 }
 
 
@@ -279,19 +301,49 @@ def _get_state_abbr(address):
     return _STATE_ABBR.get(address.get("state", ""), "")
 
 
+# Characters that must not be left dangling at a cut. "/" is here because
+# GeoNames carries 27 Swiss names like "Zuerich (Kreis 11) / Oberstrass",
+# which cut to "Zuerich (Kreis 11) /".
+_TRAILING_JUNK = " -,;:./("
+
+
+def _truncate_name(name):
+    """Trim to MAX_NAME_LEN, ending on a whole word.
+
+    A plain slice cuts mid-word: 518 of the 69,629 cities in the database
+    rendered like "Dubai International Fina" and "Notre-Dame-de-l'Ile-Perr".
+    Prefer the last space or hyphen inside the limit; fall back to the hard slice
+    only when that would leave too little to identify the place (a single very
+    long word).
+    """
+    if len(name) <= MAX_NAME_LEN:
+        return name
+    head = name[:MAX_NAME_LEN]
+    cut = max(head.rfind(" "), head.rfind("-"))
+    if cut >= MAX_NAME_LEN // 2:
+        # Strip punctuation too, or a name that breaks after a comma renders
+        # "United Townships of Dysart," with the list it introduced cut off.
+        out = head[:cut].rstrip(_TRAILING_JUNK)
+    else:
+        out = head.rstrip(_TRAILING_JUNK)
+    # Never hand back "": a name made entirely of separators would render as a
+    # bare "nr " on the panel. head is non-empty here by construction.
+    return out or head
+
+
 def _format_city_name(name, state, country_code=""):
     """Format city name with state (US/CA) or country code, respecting MAX_NAME_LEN."""
     if country_code.lower() in ("us", "ca") and state:
         candidate = f"{name}, {state}"
         if len(candidate) <= MAX_NAME_LEN:
             return candidate
-        return name if len(name) <= MAX_NAME_LEN else name[:MAX_NAME_LEN].rstrip()
+        return _truncate_name(name)
     # All other countries: append 2-letter country code
     suffix = country_code.upper()
     candidate = f"{name}, {suffix}" if suffix else name
     if len(candidate) <= MAX_NAME_LEN:
         return candidate
-    return name if len(name) <= MAX_NAME_LEN else name[:MAX_NAME_LEN].rstrip()
+    return _truncate_name(name)
 
 
 # ---------------------------------------------------------------------------
@@ -458,8 +510,12 @@ def _nominatim_fetch(lat, lon):
                 candidate.encode("ascii")
             except UnicodeEncodeError:
                 continue
-            if len(candidate) > MAX_NAME_LEN:
-                continue
+            # No length check here: _format_city_name truncates at a word
+            # boundary. Skipping a long name instead silently DISCARDED the
+            # correct settlement and fell through to the next address key, or
+            # all the way to the cities.json nearest-neighbour -- which can be a
+            # different town kilometres away. A long name is still the right
+            # answer; it just needs trimming.
             city_name = _format_city_name(candidate, state, country_code)
             break
 
@@ -474,14 +530,22 @@ def _nominatim_fetch(lat, lon):
             _nom_resolved = True
 
     except Exception:
-        # On any error, record the query coords so we don't retry immediately.
-        # _nom_resolved is left as-is on purpose: an error means we did not learn
-        # anything, so we keep whatever the last successful lookup concluded
-        # rather than flipping to "unknown" (which would drop the ocean name
-        # mid-crossing) or to "water" (which would claim water over land).
+        # On any error, record the query coords so we don't retry immediately,
+        # and DROP the water claim.
+        #
+        # _nom_resolved must not survive a failure. The water test is "a
+        # completed lookup found no country", and an error completed nothing.
+        # Leaving it set pins the last verdict onto every later position: a
+        # flight that resolves mid-Atlantic (resolved=True, country=None) and
+        # then crosses the Irish coast into a Nominatim outage keeps reporting
+        # "North Atlantic" over County Kerry, re-confirming it every 15km for as
+        # long as the outage lasts. Falling back to the nearest-city name is the
+        # older, noisier behaviour, but it is merely imprecise rather than
+        # confidently wrong about being at sea.
         with _nom_lock:
             _nom_query_lat = lat
             _nom_query_lon = lon
+            _nom_resolved = False
     finally:
         with _nom_lock:
             _nom_fetching = False
@@ -503,6 +567,12 @@ def _over_water():
     Gated on _nom_resolved because _nom_country is None both over water AND
     before the first background fetch returns; treating "not known yet" as water
     would flash an ocean name over land on every requery.
+
+    Known and accepted: this classifies the CURRENT position using a lookup for a
+    position up to REQUERY_AFTER_KM (15km) plus fetch latency behind it, so a
+    coast crossing reports the wrong side for roughly the last 20km. Tightening
+    that means querying Nominatim more often, which the render budget and their
+    rate limit both argue against.
     """
     with _nom_lock:
         return _nom_resolved and _nom_country is None
@@ -570,7 +640,14 @@ def get_nearest_landmark(latitude, longitude):
                 best_dist = dist
                 best_park = name
         if best_park and best_dist <= PARKS_RADIUS_KM:
-            return {"name": best_park, "distance_km": best_dist, "type": "park"}
+            # Parks bypassed MAX_NAME_LEN completely: 94 of the 474 NPS names
+            # exceed it even after _strip_park_name, up to 65 chars
+            # ("Washington-Rochambeau Revolutionary Route National Historic
+            # Trail"), which holds the scroll far longer than any city name is
+            # allowed to. Truncated here rather than at load time so the cache
+            # stays faithful and a change to the cap takes effect immediately.
+            return {"name": _truncate_name(best_park),
+                    "distance_km": best_dist, "type": "park"}
 
     # 2. Nominatim settlement only (not country/ocean fallbacks)
     nom_city, nom_country = _ensure_nominatim(latitude, longitude)
