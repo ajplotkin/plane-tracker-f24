@@ -4,7 +4,9 @@ landmarks.py — Nearest landmark lookup combining NPS parks, Nominatim, and cit
 Priority chain:
   1. NPS parks within 30km — named national/state parks from NPS API.
   2. Nominatim reverse geocode — background thread, re-queried every 15km of movement.
-  3. Local cities.json nearest-neighbour — via utilities/cities.py.
+  3. Local cities.json nearest-neighbour — via utilities/cities.py, formatted
+     with state/country so it matches step 2 ("Ephrata, WA", "Paris, FR").
+     Skipped over open water, where the nearest city can be 1000km+ away.
   4. Country name from country_code — for remote land areas.
   5. Ocean/sea name from coordinates — bounding-box lookup over water.
 
@@ -134,8 +136,15 @@ def _country_name(country_code):
 
 _OCEAN_REGIONS = [
     # Seas and gulfs (more specific, checked first)
-    ("Caribbean Sea",       (8,  26, -87, -59)),
+    # West edge is -84, not -87: at -85..-87 this box was claiming the PACIFIC
+    # coast of Costa Rica and Nicaragua. Yucatan waters west of -84 are picked
+    # up by the Gulf of Mexico box instead. The Gulf of Panama (around 8N, -79)
+    # is still misread as Caribbean — the isthmus runs east-west there, so no
+    # rectangle and no single meridian can separate its two coasts.
+    ("Caribbean Sea",       (8,  26, -84, -59)),
     ("Gulf of Mexico",      (18, 31, -98, -80)),
+    ("Bay of Biscay",        (43, 49, -12,  -1)),
+    ("English Channel",      (49, 51,  -6,   2)),
     ("Mediterranean Sea",   (30, 47,  -6,  37)),
     ("North Sea",           (51, 62,  -4,  13)),
     ("Baltic Sea",          (53, 66,  10,  30)),
@@ -167,11 +176,46 @@ _OCEAN_REGIONS = [
 
 
 def _get_ocean_name(lat, lon):
-    """Return ocean/sea name for coordinates, or None if over land."""
+    """Return ocean/sea name for coordinates, or None if outside every box.
+
+    Deliberately partial: the boxes do not tile the globe, so continental
+    interiors fall through. Callers that already KNOW the position is water want
+    _water_name() instead, which never returns None.
+    """
     for name, (lat_min, lat_max, lon_min, lon_max) in _OCEAN_REGIONS:
         if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
             return name
     return None
+
+
+def _ocean_basin(lat, lon):
+    """Coarse basin name for a position already known to be over water.
+
+    TOTAL by construction — every coordinate gets a name. The boxes above leave
+    real gaps that a rectangle list cannot close: a globe sweep found 115
+    open-water probes with no name at all, including the entire SE Pacific off
+    Chile and the North Pacific west of the dateline (the Tokyo-Hawaii tracks),
+    because the "North Pacific" box only ran -180..-80.
+
+    The Atlantic/Pacific split cannot be one meridian — the Americas are in the
+    way — so it follows the land: Panama (~-80) in the north, Cape Horn (~-70)
+    in the south. Likewise the Indian Ocean reaches further east below the
+    equator, around Australia's south coast (~147).
+    """
+    if lat >= 66:
+        return "Arctic Ocean"
+    if lat <= -55:
+        return "Southern Ocean"
+    if 20 <= lon < (120 if lat >= 0 else 147):
+        return "Indian Ocean"
+    if (-80 if lat >= 0 else -70) <= lon < 20:
+        return "North Atlantic" if lat >= 0 else "South Atlantic"
+    return "North Pacific" if lat >= 0 else "South Pacific"
+
+
+def _water_name(lat, lon):
+    """Named sea if one matches, else the basin. Never None."""
+    return _get_ocean_name(lat, lon) or _ocean_basin(lat, lon)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +240,35 @@ _STATE_ABBR = {
     "Kansas": "KS", "Nebraska": "NE", "South Dakota": "SD",
     "North Dakota": "ND", "Oklahoma": "OK",
 }
+
+
+# GeoNames ships US states as the 2-letter code in admin1, but Canada as NUMERIC
+# codes — Ontario is "08", so a bare admin1 would render "Toronto, 08". Mapping
+# confirmed against cities5000 by sampling a city per code: 12->Whitehorse (YT),
+# 13->Yellowknife (NT), 14->Iqaluit (NU), 09->Charlottetown (PE), 03->Brandon
+# (MB), 02->Abbotsford (BC), 05->Bay Roberts (NL). ("06" is retired and absent.)
+_CA_PROVINCE = {
+    "01": "AB", "02": "BC", "03": "MB", "04": "NB", "05": "NL",
+    "07": "NS", "08": "ON", "09": "PE", "10": "QC", "11": "SK",
+    "12": "YT", "13": "NT", "14": "NU",
+}
+
+
+def _state_from_admin1(country_code, admin1):
+    """2-letter state/province for a GeoNames admin1 code, or "" if there is no
+    useful one.
+
+    Only US and CA get one. Everywhere else admin1 is a region number that means
+    nothing on a 64px panel ("Reykjavik, 39"), so we return "" and let
+    _format_city_name fall back to the country code instead.
+    """
+    cc = (country_code or "").lower()
+    a1 = (admin1 or "").strip()
+    if cc == "us":
+        return a1 if len(a1) == 2 and a1.isalpha() else ""
+    if cc == "ca":
+        return _CA_PROVINCE.get(a1, "")
+    return ""
 
 
 def _get_state_abbr(address):
@@ -347,6 +420,7 @@ _nom_country = None  # Country name fallback from Nominatim response
 _nom_query_lat = None  # Lat of the query that produced the result
 _nom_query_lon = None  # Lon of the query that produced the result
 _nom_fetching = False  # True while a background fetch is in flight
+_nom_resolved = False  # A fetch COMPLETED for this area — see _over_water()
 _nom_lock = threading.Lock()
 
 
@@ -357,6 +431,7 @@ def _nominatim_fetch(lat, lon):
     priority chain can prefer cities.json over vague country names.
     """
     global _nom_city, _nom_country, _nom_query_lat, _nom_query_lon, _nom_fetching
+    global _nom_resolved
     try:
         r = requests.get(
             NOMINATIM_URL,
@@ -396,15 +471,41 @@ def _nominatim_fetch(lat, lon):
             _nom_country = country_name
             _nom_query_lat = lat
             _nom_query_lon = lon
+            _nom_resolved = True
 
     except Exception:
-        # On any error, record the query coords so we don't retry immediately
+        # On any error, record the query coords so we don't retry immediately.
+        # _nom_resolved is left as-is on purpose: an error means we did not learn
+        # anything, so we keep whatever the last successful lookup concluded
+        # rather than flipping to "unknown" (which would drop the ocean name
+        # mid-crossing) or to "water" (which would claim water over land).
         with _nom_lock:
             _nom_query_lat = lat
             _nom_query_lon = lon
     finally:
         with _nom_lock:
             _nom_fetching = False
+
+
+def _over_water():
+    """True only when a COMPLETED Nominatim lookup found no country at all.
+
+    Nominatim answers open water with {"error": "Unable to geocode"} and land —
+    however empty — with a country_code, so "resolved but no country" is a
+    reliable water test.
+
+    Distance to the nearest city is NOT such a test, which is why this exists.
+    Measured against cities5000: remote LAND runs 280-760km from the nearest city
+    (N Canada barrens 760, Australian outback 613, Greenland 512) while open
+    WATER can be much closer (Bay of Biscay 155, mid-Pacific 222). The ranges
+    overlap, so no distance threshold separates them.
+
+    Gated on _nom_resolved because _nom_country is None both over water AND
+    before the first background fetch returns; treating "not known yet" as water
+    would flash an ocean name over land on every requery.
+    """
+    with _nom_lock:
+        return _nom_resolved and _nom_country is None
 
 
 def _ensure_nominatim(lat, lon):
@@ -452,6 +553,9 @@ def get_nearest_landmark(latitude, longitude):
     Steps 2 and 4 are separated so that cities.json (step 3) always beats
     a vague country name. "Topeka" is more useful than "United States".
 
+    Step 3 is skipped over open water (see _over_water) — there the nearest city
+    carries no information and the ocean name does.
+
     Returns {"name": str, "distance_km": float, "type": str} or None.
     """
     _load_parks()
@@ -475,8 +579,24 @@ def get_nearest_landmark(latitude, longitude):
 
     # 3. Fall back to local cities.json nearest-neighbour
     city = get_nearest_city(latitude, longitude)
+
+    # 3a. Over open water the nearest city is not a location, it is noise: a plane
+    #     mid-Atlantic was labelled "nr Ribeira Grande" for a town 1079km away,
+    #     rendered identically to a town it was actually over. Name the water.
+    #     Only fires on a resolved no-country lookup, so land is untouched.
+    if _over_water():
+        return {"name": _water_name(latitude, longitude),
+                "distance_km": 0.0, "type": "ocean"}
+
     if city:
-        return {"name": city["name"], "distance_km": city["distance_km"], "type": "city"}
+        return {
+            "name": _format_city_name(
+                city["name"],
+                _state_from_admin1(city.get("country"), city.get("admin1")),
+                city.get("country") or ""),
+            "distance_km": city["distance_km"],
+            "type": "city",
+        }
 
     # 4. Country name from Nominatim response (last resort for land)
     if nom_country:
@@ -493,12 +613,14 @@ def get_nearest_landmark(latitude, longitude):
 def clear_cache():
     """Clear Nominatim cache — forces re-query on next call."""
     global _nom_city, _nom_country, _nom_query_lat, _nom_query_lon, _nom_fetching
+    global _nom_resolved
     with _nom_lock:
         _nom_city = None
         _nom_country = None
         _nom_query_lat = None
         _nom_query_lon = None
         _nom_fetching = False
+        _nom_resolved = False
 
 
 def preload():

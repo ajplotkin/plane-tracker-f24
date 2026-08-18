@@ -10,12 +10,14 @@ No API key required. ~50K cities with population > 5000.
 Usage:
     from utilities.cities import get_nearest_city
     nearest = get_nearest_city(40.6413, -73.7781)
-    # {"name": "New York City", "distance_km": 18.3}
+    # {"name": "New York City", "distance_km": 18.3,
+    #  "country": "US", "admin1": "NY"}
 """
 
 import json
 import math
 import os
+import sys
 import threading
 import zipfile
 from io import BytesIO
@@ -26,9 +28,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 CACHE_FILE = os.path.join(BASE_DIR, "cities.json")
 ZIP_URL = "https://download.geonames.org/export/dump/cities5000.zip"
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
-# In-memory list: [[name, lat, lon], ...]
+# In-memory list: [[name, lat, lon, country_code, admin1], ...]
+# country_code/admin1 are carried so the display can disambiguate the many
+# duplicate place names (cities5000 has four US Parises and three Bostons).
 _db = []
 _loaded = False
 _load_lock = threading.Lock()
@@ -44,6 +48,24 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return 6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _intern_codes(cities):
+    """Intern the country/admin1 codes in-place.
+
+    There are only 245 distinct country codes and 3,793 distinct (country,
+    admin1) pairs across 69,629 rows, so without this the two extra fields cost
+    139,258 separate str objects — measured +8.76 MB of heap versus +1.15 MB
+    interned. These Pis are 512MB and heap pressure is what caused the scroll
+    stutter this whole subsystem was rewritten for, so the 8MB is not affordable.
+    json.load() builds fresh strings every boot, so this has to run on the cache
+    path too, not just after a download.
+    """
+    for row in cities:
+        if len(row) > 4:
+            row[3] = sys.intern(row[3])
+            row[4] = sys.intern(row[4])
+    return cities
+
+
 def _download_and_build():
     """Download cities5000.zip, extract, and build city list."""
     print("[Cities] Downloading cities5000 database...")
@@ -56,7 +78,7 @@ def _download_and_build():
             with zf.open("cities5000.txt") as f:
                 for line in f:
                     fields = line.decode("utf-8").split("\t")
-                    if len(fields) < 6:
+                    if len(fields) < 11:
                         continue
                     name = fields[2] or fields[1]  # asciiname preferred (bitmap font safe)
                     try:
@@ -64,17 +86,30 @@ def _download_and_build():
                         lon = float(fields[5])
                     except (ValueError, IndexError):
                         continue
-                    cities.append([name, lat, lon])
+                    # col 8 = ISO country code, col 10 = admin1 (US ships the
+                    # 2-letter state here; other countries ship region numbers).
+                    cities.append([name, lat, lon, fields[8], fields[10]])
 
-        cache_data = {"_version": CACHE_VERSION, "cities": cities}
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f)
-        print(f"[Cities] Database built — {len(cities)} cities cached to cities.json (v{CACHE_VERSION})")
-        return cities
+        _intern_codes(cities)
 
     except Exception as e:
         print(f"[Cities] Download failed: {e}")
         return []
+
+    # Saving is best-effort and deliberately OUTSIDE the fetch try-block. The app
+    # drops privileges to `daemon`, which does not necessarily own cities.json --
+    # the same ownership trap that stopped airports.py rebuilding its cache. If
+    # the write fails we still have a perfectly good list in memory, and losing it
+    # would leave _db empty, which takes the whole nearest-city step down with it.
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"_version": CACHE_VERSION, "cities": cities}, f)
+        print(f"[Cities] Database built — {len(cities)} cities cached to cities.json (v{CACHE_VERSION})")
+    except Exception as e:
+        print(f"[Cities] Built {len(cities)} cities but could not write cities.json: {e} "
+              f"— running from memory, will re-download next start")
+
+    return cities
 
 
 def _load():
@@ -93,7 +128,7 @@ def _load():
                     raw = json.load(f)
 
                 if isinstance(raw, dict) and raw.get("_version") == CACHE_VERSION:
-                    _db = raw.get("cities", [])
+                    _db = _intern_codes(raw.get("cities", []))
                     _loaded = True
                     return
                 else:
@@ -116,6 +151,17 @@ _grid = None
 _grid_src = None    # the exact _db list object the grid was built from
 
 
+def _row_fields(row):
+    """(name, lat, lon, country, admin1) from a db row.
+
+    Pads rather than unpacks: v1 caches and several test fixtures build 3-element
+    rows, and those should degrade to "no state/country" instead of raising.
+    """
+    return (row[0], row[1], row[2],
+            row[3] if len(row) > 3 else "",
+            row[4] if len(row) > 4 else "")
+
+
 def _build_grid():
     """Bucket the loaded city list by integer degree. Idempotent.
 
@@ -128,20 +174,28 @@ def _build_grid():
         return _grid
     src = _db                       # snapshot: _db may be swapped mid-build, and
     g = {}                          # labelling a stale grid as fresh never heals
-    for name, clat, clon in src:
+    for row in src:
+        _, clat, clon, _, _ = _row_fields(row)
         # Wrap the key exactly as lookups do, so a city at lon == +180.0 (legal,
         # though GeoNames normalises to [-180, 180)) lands in a bucket we search.
         g.setdefault((int(clat // 1), ((int(clon // 1) + 180) % 360) - 180),
-                     []).append((name, clat, clon))
+                     []).append(row)
     _grid, _grid_src = g, src
     return _grid
+
+
+def _as_result(row, dist):
+    name, _, _, country, admin1 = _row_fields(row)
+    return {"name": name, "distance_km": dist,
+            "country": country, "admin1": admin1}
 
 
 def get_nearest_city(latitude, longitude):
     """
     Find the nearest city to the given coordinates.
 
-    Returns {"name": str, "distance_km": float} or None if no cities loaded.
+    Returns {"name": str, "distance_km": float, "country": str, "admin1": str}
+    or None if no cities loaded.
 
     PERFORMANCE: reachable from the RENDER THREAD (scenes/trackedstats.py ->
     landmarks.get_nearest_landmark -> here, whenever Nominatim has no settlement for
@@ -201,7 +255,7 @@ def get_nearest_city(latitude, longitude):
     # the original code cost everywhere, which is the honest trade.
     _MAX_RING = 45
 
-    best_name, best_dist = None, float("inf")
+    best_row, best_dist = None, float("inf")
     ring = 0
     while ring <= _MAX_RING:
         if ring == 0:
@@ -219,32 +273,32 @@ def get_nearest_city(latitude, longitude):
             clat_key = ilat + dlat
             if clat_key < -90 or clat_key > 90:
                 continue            # no cities past the poles
-            for name, clat, clon in grid.get(
+            for row in grid.get(
                     (clat_key, ((ilon + dlon + 180) % 360) - 180), ()):
-                d = _haversine_km(latitude, longitude, clat, clon)
+                d = _haversine_km(latitude, longitude, row[1], row[2])
                 if d < best_dist:
-                    best_dist, best_name = d, name
-        if best_name is not None and best_dist <= _min_dist_beyond(ring):
-            return {"name": best_name, "distance_km": best_dist}
+                    best_dist, best_row = d, row
+        if best_row is not None and best_dist <= _min_dist_beyond(ring):
+            return _as_result(best_row, best_dist)
         ring += 1
 
     # Bound not met within _MAX_RING (high latitude, or a very empty region):
     # finish exhaustively so the answer is always the true nearest.
-    best_name, best_dist = None, float("inf")
-    for name, clat, clon in _db:
-        d = _haversine_km(latitude, longitude, clat, clon)
+    best_row, best_dist = None, float("inf")
+    for row in _db:
+        d = _haversine_km(latitude, longitude, row[1], row[2])
         if d < best_dist:
-            best_dist, best_name = d, name
+            best_dist, best_row = d, row
 
-    if best_name is None:
+    if best_row is None:
         return None
 
-    return {"name": best_name, "distance_km": best_dist}
+    return _as_result(best_row, best_dist)
 
 
 def refresh():
     """Force re-download of cities database."""
-    global _db, _loaded
+    global _loaded
     _loaded = False
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
