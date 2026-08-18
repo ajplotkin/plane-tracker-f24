@@ -12,6 +12,25 @@ Usage:
     from utilities.airlabs import get_flight_schedule
     sched = get_flight_schedule("UA353")
     # {"origin": "EWR", "destination": "LAX", "dep_time": "2026-05-11 18:30", ...}
+
+LEG PINNING
+-----------
+A flight NUMBER is not a flight. UA353 flies every day, and often two or three
+legs in one day, so /schedules returns several rows and this module has to pick
+one. Picking "the soonest-departing still-relevant leg" (the unpinned path
+below) is right while a flight is being watched TOWARDS departure, but it is
+wrong for deciding that a tracked flight is OVER: once today's leg ages out of
+the selection window, TOMORROW's leg is substituted, the arrival jumps a day
+into the future, and overhead.py's "arrival + 2h has passed -> wipe" rule can
+never fire again (the two windows were exact negations of each other).
+
+So a caller that is tracking ONE leg passes `pin_dep_ts` — the scheduled
+departure it saved when the flight was chosen — and gets back the leg NEAREST
+that time, or `LEG_GONE`. Nearest-match, not window-match: same-number legs on
+one day are 2-3h apart and must still resolve, while the next day's leg is 24h
+away and is excluded by `_PIN_TOLERANCE_SEC` with room to spare. The pin fixes
+the leg's IDENTITY only — its TIMES are re-read on every fetch, so departure
+delays are still picked up.
 """
 
 import logging
@@ -30,10 +49,66 @@ logger = logging.getLogger(__name__)
 
 _API_BASE = "https://airlabs.co/api/v9"
 
-# Module-level cache: callsign -> (result, timestamp)
-# Prevents repeated API calls for the same flight (web UI + overhead.py)
+# Module-level cache: cache key -> (result, timestamp)
+# Prevents repeated API calls for the same flight (web UI + overhead.py).
+# The key carries the pin (see _cache_key): a pinned lookup and an unpinned one
+# for the same callsign are different questions and must not share an answer.
 _cache = {}
 _CACHE_TTL = 300  # 5 minutes
+
+# How far a leg's scheduled departure may sit from the pin and still be "it".
+# Comfortably wider than a same-day leg gap (2-3h) is NOT the goal — nearest
+# wins outright — this is only the sanity bound that separates "my leg, retimed"
+# from "my leg is gone and you are looking at a different day".
+_PIN_TOLERANCE_SEC = 7200   # 2 hours
+
+
+class _LegGone:
+    """Sentinel: the pinned leg is absent from an otherwise VALID response.
+
+    Deliberately falsy, so any caller that only does `if sched:` treats it as
+    "no data" — the safe default. A caller that must tell "the leg is over /
+    gone" apart from "AirLabs did not answer" (which returns None) tests
+    `result is LEG_GONE` FIRST. That distinction is the whole point: only the
+    former may wipe a tracked flight; the latter must keep showing it.
+    """
+    __slots__ = ()
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "LEG_GONE"
+
+
+LEG_GONE = _LegGone()
+
+
+def _cache_key(callsign, pin_dep_ts):
+    return callsign if pin_dep_ts is None else (callsign, int(pin_dep_ts))
+
+
+def _nearest_leg(schedules, pin_dep_ts, tolerance=_PIN_TOLERANCE_SEC):
+    """The leg whose SCHEDULED departure is nearest `pin_dep_ts`, or None.
+
+    Matched on dep_time_ts (the scheduled time), never on dep_estimated/actual:
+    a delayed leg keeps its scheduled departure, so pinning on it survives a
+    delay — which is exactly what the departure-delay feature needs.
+    """
+    best, best_delta = None, None
+    for s in schedules or []:
+        dep = s.get("dep_time_ts")
+        if not dep:
+            continue
+        try:
+            delta = abs(float(dep) - pin_dep_ts)
+        except (TypeError, ValueError):
+            continue
+        if best_delta is None or delta < best_delta:
+            best, best_delta = s, delta
+    if best is None or best_delta > tolerance:
+        return None
+    return best
 
 # Try config first, fall back to env var
 try:
@@ -45,12 +120,29 @@ if not AIRLABS_API_KEY:
     AIRLABS_API_KEY = os.environ.get("AIRLABS_API_KEY", "")
 
 
-def get_flight_schedule(callsign):
+def get_pinned_schedule(callsign, dep_ts):
+    """The leg of `callsign` scheduled to depart at `dep_ts` — see LEG PINNING.
+
+    Returns the schedule dict, LEG_GONE (valid response, leg not in it), or
+    None (AirLabs unreachable / no key). A thin alias for the pinned form of
+    get_flight_schedule; exists so call sites read as what they mean.
+    """
+    return get_flight_schedule(callsign, pin_dep_ts=dep_ts)
+
+
+def get_flight_schedule(callsign, pin_dep_ts=None):
     """
     Look up flight schedule from AirLabs.
 
     Accepts IATA (UA353) or ICAO (UAL353) format.
     Returns the next upcoming segment for this flight number, or None.
+
+    `pin_dep_ts` (unix ts) pins the lookup to ONE leg — the one departing
+    nearest that time (see LEG PINNING in the module docstring). With a pin the
+    return is the schedule dict, LEG_GONE when the response is valid but holds
+    no leg within `_PIN_TOLERANCE_SEC`, or None on an API failure. Without a
+    pin the behaviour is unchanged: soonest-departing still-relevant leg, or
+    None for both "nothing found" and "API failure".
 
     Returns:
         {
@@ -75,6 +167,15 @@ def get_flight_schedule(callsign):
     if not callsign:
         return None
 
+    # An unusable pin degrades to the unpinned behaviour rather than throwing
+    # away every leg: a garbage pin must not look like "the leg is gone".
+    if pin_dep_ts is not None:
+        try:
+            pin_dep_ts = float(pin_dep_ts)
+        except (TypeError, ValueError):
+            logger.warning(f"AirLabs: ignoring unusable pin {pin_dep_ts!r} for {callsign}")
+            pin_dep_ts = None
+
     # Evict expired entries periodically
     now_ts = time()
     if len(_cache) > 200:
@@ -83,7 +184,8 @@ def get_flight_schedule(callsign):
             del _cache[k]
 
     # Check module-level cache first
-    cached = _cache.get(callsign)
+    key = _cache_key(callsign, pin_dep_ts)
+    cached = _cache.get(key)
     if cached and (now_ts - cached[1]) < _CACHE_TTL:
         return cached[0]
 
@@ -102,10 +204,29 @@ def get_flight_schedule(callsign):
         data = r.json()
 
         schedules = data.get("response", [])
-        if not schedules:
+        if not schedules and pin_dep_ts is None:
             logger.info(f"AirLabs: No schedule found for {callsign}")
-            _cache[callsign] = (None, time())
+            _cache[key] = (None, time())
             return None
+
+        if pin_dep_ts is not None:
+            # PINNED: this caller is tracking one specific leg. An empty
+            # response counts as "gone" — the request succeeded and the leg is
+            # simply no longer scheduled, which is what a finished flight looks
+            # like a few hours later.
+            best = _nearest_leg(schedules, pin_dep_ts)
+            if best is None:
+                logger.info(
+                    f"AirLabs: pinned leg for {callsign} (dep_ts={int(pin_dep_ts)}) "
+                    f"not in response ({len(schedules)} leg(s)) — LEG_GONE")
+                _cache[key] = (LEG_GONE, time())
+                return LEG_GONE
+            result = _build_result(best, callsign)
+            logger.info(
+                f"AirLabs: pinned {result['flight_number']} "
+                f"{result['origin']}→{result['destination']} status={result['status']}")
+            _cache[key] = (result, time())
+            return result
 
         now = time()
 
@@ -146,12 +267,14 @@ def get_flight_schedule(callsign):
         # missed the other.
         result = _build_result(best, callsign)
         logger.info(f"AirLabs: Found {result['flight_number']} {result['origin']}→{result['destination']} status={result['status']}")
-        _cache[callsign] = (result, time())
+        _cache[key] = (result, time())
         return result
 
     except requests.exceptions.Timeout:
         logger.warning("AirLabs: Request timed out")
-        _cache[callsign] = (None, time())
+        # A timeout is an API FAILURE, never "the leg is gone" — caching None
+        # under a pinned key is right: None keeps the caller's cached leg.
+        _cache[key] = (None, time())
         return None
     except Exception as e:
         logger.warning(f"AirLabs: Error looking up {callsign}: {e}")
@@ -227,6 +350,9 @@ def _build_result(best, callsign):
         "dep_time_utc": best.get("dep_time_utc", ""),
         "arr_time": best.get("arr_time", ""),
         "arr_time_utc": best.get("arr_time_utc", ""),
+        # Unix arrival, when AirLabs sends it — unambiguous where the UTC
+        # strings need parsing. overhead.best_arrival_ts falls back to it.
+        "arr_time_ts": best.get("arr_time_ts"),
         "arr_estimated_utc": best.get("arr_estimated_utc", ""),
         "arr_actual_utc": best.get("arr_actual_utc", ""),
         # --- Departure-side revisions (see departure_delay) ---

@@ -188,14 +188,22 @@ def forget(callsign=None):
             _last_fetch_ts.pop(callsign, None)
 
 
-def _background_refresh(callsign):
-    """Re-fetch one schedule off the render core. Never raises."""
+def _background_refresh(callsign, pin_dep_ts=None):
+    """Re-fetch one schedule off the render core. Never raises.
+
+    `pin_dep_ts` keeps the refresh on the SAME LEG the caller is tracking (see
+    utilities/airlabs LEG PINNING) — an unpinned refresh can hand back the next
+    day's leg of a daily flight number, which is how a finished flight used to
+    become un-completable. A pinned lookup can also come back LEG_GONE, which
+    is falsy and therefore lands in the keep-last-good branch below: deciding a
+    flight is over is overhead.py's job, not this cadence's.
+    """
     global _refresh_pending
     with _refresh_lock:
         try:
             run_off_render_core()   # inside try: must never wedge the flag
             from utilities.airlabs import get_flight_schedule
-            fresh = get_flight_schedule(callsign)
+            fresh = get_flight_schedule(callsign, pin_dep_ts=pin_dep_ts)
             if fresh:
                 with _lock:
                     _last_good[callsign] = fresh
@@ -218,7 +226,7 @@ def _background_refresh(callsign):
                 _refresh_pending = False
 
 
-def _dispatch(callsign):
+def _dispatch(callsign, pin_dep_ts=None):
     """Start the worker unless one is already in flight."""
     global _refresh_pending
     with _lock:
@@ -226,7 +234,8 @@ def _dispatch(callsign):
             return
         _refresh_pending = True
     try:
-        threading.Thread(target=_background_refresh, args=(callsign,),
+        threading.Thread(target=_background_refresh,
+                         args=(callsign, pin_dep_ts),
                          daemon=True).start()
     except Exception as e:
         # Thread.start() can fail under memory pressure on the 512MB Pi. Clear
@@ -236,12 +245,13 @@ def _dispatch(callsign):
             _refresh_pending = False
 
 
-def maybe_refresh(callsign, sched, now=None):
+def maybe_refresh(callsign, sched, now=None, pin_dep_ts=None):
     """Return the freshest known schedule for `callsign`. NEVER BLOCKS.
 
     Returns last-good immediately; when the adaptive cadence says a refresh is
     due it dispatches a background worker whose result shows up on a later call.
     `sched` is the caller's current copy, used to seed the cache on first sight.
+    `pin_dep_ts` pins the refresh to one leg — see _background_refresh.
     """
     if not callsign:
         return sched
@@ -269,6 +279,6 @@ def maybe_refresh(callsign, sched, now=None):
     seconds_to_departure = (dep_ts - now) if dep_ts is not None else 0.0
 
     if (now - last_fetch) >= refresh_interval(seconds_to_departure):
-        _dispatch(callsign)
+        _dispatch(callsign, pin_dep_ts)
 
     return best

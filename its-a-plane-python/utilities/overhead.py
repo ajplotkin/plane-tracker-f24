@@ -545,6 +545,161 @@ def load_tracked_callsign():
         return "", None, None
 
 
+# --- Completion of a tracked flight that never went live (LEG PINNING) -----
+#
+# THE BUG THIS REPLACES. A tracked flight that never appeared in the live feed
+# could not clear itself. utilities/airlabs.get_flight_schedule picked the
+# SOONEST-departing leg for a flight number and kept only legs arriving after
+# `now - 7200`; the wipe here fired at `now > arrival + 7200`. Those are exact
+# negations, so while the dead leg was returned the wipe could not fire, and
+# the moment it aged out the NEXT DAY's leg of the same daily flight number was
+# substituted, its arrival a day in the future, cache overwritten — forever.
+# Non-repeating callsigns cleared; daily ones sat on the panel until the 36h
+# _MAX_TRACKED_HOURS cap.
+#
+# THE FIX. Every AirLabs fetch for a tracked flight passes the leg's scheduled
+# departure (`scheduled_departure` in tracked_flight.json) as a PIN, so the leg
+# cannot swap under us and its arrival is a real deadline again. The pin fixes
+# IDENTITY only — the leg's times are re-read every fetch, so the departure
+# delay feature is untouched.
+#
+# The rules live in tracked_completion_decision() as a pure function: the
+# decision to erase what the user asked to watch deserves to be readable and
+# directly testable, not spread across four nested try blocks.
+
+_COMPLETION_GRACE_SEC = 7200   # how long past arrival before a never-live flight is over
+_PIN_TOLERANCE_SEC = 7200      # same bound airlabs uses to call a leg "mine"
+
+
+def _parse_utc_hhmm(value):
+    """'YYYY-MM-DD HH:MM' interpreted as UTC -> unix ts, or None."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def best_arrival_ts(sched):
+    """Best-known arrival of ONE schedule leg, as a unix ts, or None.
+
+    Actual beats estimated beats scheduled — an early arrival must not be held
+    against the scheduled time, and a delayed one must push the deadline out.
+    Falls back to the unix scheduled arrival and finally to departure + block
+    time, because the free AirLabs tier does not promise the arrival strings.
+    """
+    if not sched:
+        return None
+    for key in ("arr_actual_utc", "arr_estimated_utc", "arr_time_utc"):
+        ts = _parse_utc_hhmm(sched.get(key) or "")
+        if ts is not None:
+            return ts
+    try:
+        arr = sched.get("arr_time_ts")
+        if arr:
+            return float(arr)
+    except (TypeError, ValueError):
+        pass
+    try:
+        dep, dur = sched.get("dep_time_ts"), sched.get("duration")
+        if dep and dur:
+            return float(dep) + int(dur) * 60
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def leg_matches_pin(sched, pin_dep_ts, tolerance=_PIN_TOLERANCE_SEC):
+    """True when `sched` is the leg we pinned.
+
+    With no pin (a flight tracked blind) there is nothing to check, so any
+    schedule counts — that case is narrowed separately by the self-pin
+    write-back in Overhead._persist_self_pin.
+    """
+    if not sched:
+        return False
+    if pin_dep_ts is None:
+        return True
+    try:
+        return abs(float(sched.get("dep_time_ts")) - float(pin_dep_ts)) <= tolerance
+    except (TypeError, ValueError):
+        return False
+
+
+def saved_arrival_ts(cached_route, pin_dep_ts, sched=None):
+    """The arrival we last knew for the pinned leg, for when it has VANISHED.
+
+    Three sources: the route cached when the flight was chosen, the last
+    schedule we held for the leg, and the pin plus that leg's block time.
+
+    The LATEST of them wins, not the first. They disagree exactly when the leg
+    was retimed — the cached route holds the arrival from the day the user
+    picked the flight, while the last schedule holds a delay published since —
+    and a leg that vanished from AirLabs while running late may still be in the
+    air. Taking the latest means this rule can only ever wipe LATER than the
+    arrival we most recently believed in, never earlier; the 36h cap is what
+    bounds the other end.
+    """
+    candidates = []
+    try:
+        arr = (cached_route or {}).get("time_scheduled_arrival")
+        if arr:
+            candidates.append(float(arr))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    arr = best_arrival_ts(sched)
+    if arr is not None:
+        candidates.append(arr)
+    try:
+        dur = (sched or {}).get("duration")
+        if pin_dep_ts is not None and dur:
+            candidates.append(float(pin_dep_ts) + int(dur) * 60)
+    except (TypeError, ValueError):
+        pass
+    return max(candidates) if candidates else None
+
+
+def tracked_completion_decision(sched, leg_gone, pin_dep_ts, cached_route, now):
+    """Is a tracked flight that never went live finished? -> (wipe, reason).
+
+    Sound ONLY because the leg is pinned; unpinned, rule 2's deadline slides a
+    day forward every time the response rolls over (see the note above).
+
+      1. the pinned leg says it LANDED (and its departure has passed) -> wipe.
+         The departure guard is what stops a leg that has not flown yet from
+         being wiped by a stale status.
+      2. best-known arrival of the pinned leg + 2h has passed -> wipe.
+      3. the pinned leg is GONE from a valid response and the arrival we last
+         knew + 2h has passed -> wipe. Gone but not yet due means retimed, so
+         keep it and let the 36h cap backstop.
+      4. anything else — most importantly an API failure, which is None and
+         NOT LEG_GONE — keeps the cached flight. A network blip must never
+         erase what the user asked to watch.
+    """
+    if leg_gone:
+        arr = saved_arrival_ts(cached_route, pin_dep_ts, sched)
+        if arr is not None and now > arr + _COMPLETION_GRACE_SEC:
+            return True, "pinned leg gone from AirLabs and its arrival passed >2h ago"
+        return False, "pinned leg gone but its arrival has not passed — retimed?"
+
+    if sched:
+        if (sched.get("status") or "").lower() == "landed":
+            dep = (sched.get("dep_actual_ts") or sched.get("dep_time_ts")
+                   or pin_dep_ts)
+            try:
+                departed = dep is None or now > float(dep)
+            except (TypeError, ValueError):
+                departed = True
+            if departed:
+                return True, "pinned leg reported landed"
+        arr = best_arrival_ts(sched)
+        if arr is not None and now > arr + _COMPLETION_GRACE_SEC:
+            return True, "pinned leg arrival passed >2h ago"
+        return False, "pinned leg still current"
+
+    return False, "no schedule and no leg-gone verdict (API failure) — keeping cache"
+
+
 # Logging Closest Flights
 
 def log_flight_data(entry: dict):
@@ -829,6 +984,14 @@ class Overhead:
         }
 
         try:
+            # Staleness cap FIRST — it reads only TRACKED_FILE, no network.
+            # The FR24 fetch on the next line can raise a network error that
+            # aborts this poll into the handler that deliberately PRESERVES the
+            # last tracked data, so while FR24 was unreachable the 36h cap
+            # (which used to sit after the fetch) never ran and a zombie tracked
+            # flight outlived even that backstop.
+            self._enforce_tracked_age_cap()
+
             # --- STEP 1: Check zone for overhead flights ---
             flights = self._api.get_flights(bounds=ZONE_DEFAULT)
             stats["zone_raw"] = len(flights)
@@ -1094,72 +1257,62 @@ class Overhead:
                     except Exception:
                         pass
 
-                # Hard staleness guard — if tracked >36h, auto-wipe
-                try:
-                    with open(TRACKED_FILE, "r", encoding="utf-8") as f:
-                        tf_data = json.load(f)
-                    set_ts = tf_data.get("set_ts", 0)
-                    if set_ts and (time() - set_ts) > self._MAX_TRACKED_HOURS * 3600:
+                # The 36h staleness cap is enforced at the TOP of _grab, before
+                # the FR24 zone fetch — a network error there aborts this poll
+                # into a handler that keeps the last tracked data, so a cap that
+                # ran here would never fire during an FR24 outage. It is not
+                # repeated here: it would be dead code. The only way the file
+                # could newly qualify between that call and this line is the
+                # set_ts written by the reset block above, and that set_ts is
+                # `now` — 36 hours from qualifying.
+
+                # Departure window guard: don't search FR24 until 30 min before
+                # scheduled departure. Prevents matching an earlier same-day leg.
+                # Concept from c0wsaysmoo/plane-tracker-rgb-pi.
+                _skip_poll = False
+                if scheduled_dep and not self._tracked_was_live:
+                    mins_to_dep = (scheduled_dep - time()) / 60
+                    if mins_to_dep > 30:
                         logger.info(
-                            f"Tracked flight {tracked_callsign} has been tracked "
-                            f"for >{self._MAX_TRACKED_HOURS}h — auto-wiping"
+                            f"Tracked {tracked_callsign} departs in "
+                            f"{mins_to_dep:.0f}m — not polling FR24 yet"
                         )
-                        self._do_auto_wipe()
-                        tracked_callsign = ""
-                except Exception:
-                    pass
+                        _skip_poll = True
+                        # Build SCHEDULED display from cached_route if available
+                        if cached_route:
+                            sched_cs = tracked_callsign
+                            if len(sched_cs) >= 3 and sched_cs[:2] in IATA_TO_ICAO and sched_cs[2:3].isdigit():
+                                icao_pfx = IATA_TO_ICAO.get(sched_cs[:2])
+                                if icao_pfx:
+                                    sched_cs = icao_pfx + sched_cs[2:]
+                            tracked_data = {
+                                "callsign": sched_cs,
+                                "number": tracked_callsign,
+                                "airline_name": cached_route.get("airline_name", ""),
+                                "is_live": False,
+                                "is_scheduled": True,
+                                "origin": _clean_code(cached_route.get("origin", "")),
+                                "destination": _clean_code(cached_route.get("destination", "")),
+                                "dep_time": cached_route.get("dep_time", ""),
+                                "arr_time": cached_route.get("arr_time", ""),
+                                "schedule_status": "scheduled",
+                                "aircraft_type": cached_route.get("aircraft_type", ""),
+                                "altitude": 0, "ground_speed": 0, "heading": 0,
+                                "vertical_speed": 0, "dist_remaining": None,
+                                "total_distance": None, "time_remaining": None,
+                                "latitude": None, "longitude": None,
+                                "last_seen_ts": 0, "dest_lat": 0, "dest_lon": 0,
+                            }
 
-                if not tracked_callsign:
-                    # Wiped by staleness guard — skip grab
-                    pass
-                else:
-                    # Departure window guard: don't search FR24 until 30 min before
-                    # scheduled departure. Prevents matching an earlier same-day leg.
+                if not _skip_poll:
+                    # Position-only mode: after first airborne, skip expensive
+                    # get_flight_details and use cached route data instead.
                     # Concept from c0wsaysmoo/plane-tracker-rgb-pi.
-                    _skip_poll = False
-                    if scheduled_dep and not self._tracked_was_live:
-                        mins_to_dep = (scheduled_dep - time()) / 60
-                        if mins_to_dep > 30:
-                            logger.info(
-                                f"Tracked {tracked_callsign} departs in "
-                                f"{mins_to_dep:.0f}m — not polling FR24 yet"
-                            )
-                            _skip_poll = True
-                            # Build SCHEDULED display from cached_route if available
-                            if cached_route:
-                                sched_cs = tracked_callsign
-                                if len(sched_cs) >= 3 and sched_cs[:2] in IATA_TO_ICAO and sched_cs[2:3].isdigit():
-                                    icao_pfx = IATA_TO_ICAO.get(sched_cs[:2])
-                                    if icao_pfx:
-                                        sched_cs = icao_pfx + sched_cs[2:]
-                                tracked_data = {
-                                    "callsign": sched_cs,
-                                    "number": tracked_callsign,
-                                    "airline_name": cached_route.get("airline_name", ""),
-                                    "is_live": False,
-                                    "is_scheduled": True,
-                                    "origin": _clean_code(cached_route.get("origin", "")),
-                                    "destination": _clean_code(cached_route.get("destination", "")),
-                                    "dep_time": cached_route.get("dep_time", ""),
-                                    "arr_time": cached_route.get("arr_time", ""),
-                                    "schedule_status": "scheduled",
-                                    "aircraft_type": cached_route.get("aircraft_type", ""),
-                                    "altitude": 0, "ground_speed": 0, "heading": 0,
-                                    "vertical_speed": 0, "dist_remaining": None,
-                                    "total_distance": None, "time_remaining": None,
-                                    "latitude": None, "longitude": None,
-                                    "last_seen_ts": 0, "dest_lat": 0, "dest_lon": 0,
-                                }
-
-                    if not _skip_poll:
-                        # Position-only mode: after first airborne, skip expensive
-                        # get_flight_details and use cached route data instead.
-                        # Concept from c0wsaysmoo/plane-tracker-rgb-pi.
-                        pos_only = self._tracked_was_live and self._tracked_route_cached is not None
-                        tracked_data = self._grab_tracked(
-                            tracked_callsign, zone_flights=flights,
-                            update_position_only=pos_only,
-                        )
+                    pos_only = self._tracked_was_live and self._tracked_route_cached is not None
+                    tracked_data = self._grab_tracked(
+                        tracked_callsign, zone_flights=flights,
+                        update_position_only=pos_only,
+                    )
 
                 if tracked_data and tracked_data.get("is_live"):
                     just_became_live = not self._tracked_was_live
@@ -1284,49 +1437,61 @@ class Overhead:
                                 if self._tracked_last_data:
                                     tracked_data = estimate_stale_data(self._tracked_last_data)
                         else:
-                            # No ETA data — check AirLabs scheduled arrival as reality check
+                            # No ETA — position-only cycles carry none, and a
+                            # restart loses it — so reality-check against the
+                            # PINNED leg's best-known arrival. Checking whatever
+                            # schedule happened to be cached was the same hole
+                            # as below: if that cache had rolled to the next
+                            # day's leg its arrival is always in the future, so
+                            # this branch served stale data forever. A cached
+                            # schedule that is not our leg is worth nothing here
+                            # and falls through to the miss counter.
                             sched = self._tracked_schedule_cache.get(tracked_callsign)
-                            sched_arr_utc = sched.get("arr_time_utc") if sched else None
-                            sched_status = sched.get("status", "") if sched else ""
-                            if sched_arr_utc and sched_status != "cancelled":
-                                try:
-                                    arr_ts = datetime.strptime(sched_arr_utc, "%Y-%m-%d %H:%M").replace(
-                                        tzinfo=timezone.utc).timestamp()
-                                    if now_ts < arr_ts:
-                                        # Scheduled arrival still in future — don't wipe
-                                        if self._tracked_last_data:
-                                            tracked_data = estimate_stale_data(self._tracked_last_data)
-                                    else:
-                                        # Past scheduled arrival — use miss counter
-                                        self._tracked_miss_count += 1
-                                        if self._tracked_miss_count >= self._TRACKED_MISS_THRESHOLD:
-                                            self._do_auto_wipe()
-                                        elif self._tracked_last_data:
-                                            tracked_data = estimate_stale_data(self._tracked_last_data)
-                                except (ValueError, TypeError):
-                                    # Bad date format — fall through to miss counter
-                                    self._tracked_miss_count += 1
-                                    if self._tracked_miss_count >= self._TRACKED_MISS_THRESHOLD:
-                                        self._do_auto_wipe()
-                                    elif self._tracked_last_data:
-                                        tracked_data = estimate_stale_data(self._tracked_last_data)
+                            if not leg_matches_pin(sched, scheduled_dep):
+                                sched = None
+                            arr_ts = best_arrival_ts(sched)
+                            sched_status = (sched.get("status") or "") if sched else ""
+                            if (arr_ts is not None and sched_status != "cancelled"
+                                    and now_ts < arr_ts):
+                                # Arrival still ahead — oceanic gap, serve estimated data
+                                # Don't reset miss counter (preserve accumulation for later)
+                                if self._tracked_last_data:
+                                    tracked_data = estimate_stale_data(self._tracked_last_data)
                             else:
-                                # No schedule data either — fall back to miss counter
+                                # Past the arrival, cancelled, or nothing usable
+                                # — confirm with the miss counter before wiping.
                                 self._tracked_miss_count += 1
                                 if self._tracked_miss_count >= self._TRACKED_MISS_THRESHOLD:
                                     self._do_auto_wipe()
                                 elif self._tracked_last_data:
                                     tracked_data = estimate_stale_data(self._tracked_last_data)
                     else:
-                        # Never been live — try AirLabs schedule
-                        # Cache successful results; retry on failure (airlabs module has 5-min TTL)
+                        # Never been live — AirLabs schedule for the PINNED leg.
+                        # Every fetch below carries pin_dep_ts so the answer is
+                        # always about the leg the user is tracking; without it
+                        # the response rolls to the next day's leg of the same
+                        # flight number and the flight can never be completed
+                        # (see tracked_completion_decision).
+                        from utilities.airlabs import LEG_GONE, get_flight_schedule
+                        pin_dep_ts = scheduled_dep
+                        _leg_gone = False
+                        _now = time()
+
                         sched = self._tracked_schedule_cache.get(tracked_callsign)
                         if sched is None:
-                            from utilities.airlabs import get_flight_schedule
-                            sched = get_flight_schedule(tracked_callsign)
-                            if sched:
+                            fetched = get_flight_schedule(
+                                tracked_callsign, pin_dep_ts=pin_dep_ts)
+                            if fetched is LEG_GONE:
+                                # Valid response, our leg is not in it. Not
+                                # cached here: this is a verdict, not a schedule.
+                                _leg_gone = True
+                            elif fetched:
+                                sched = fetched
                                 self._tracked_schedule_cache[tracked_callsign] = sched
                                 tracked_schedule.note_fetched(tracked_callsign, sched)
+                                if pin_dep_ts is None:
+                                    pin_dep_ts = self._persist_self_pin(
+                                        tracked_callsign, sched)
                         else:
                             # Already have a schedule — keep it DELAY-AWARE. A
                             # cached departure time used to be frozen until the
@@ -1336,52 +1501,41 @@ class Overhead:
                             # worker thread when its adaptive cadence says one is
                             # due; the new value lands on a later poll.
                             sched = tracked_schedule.maybe_refresh(
-                                tracked_callsign, sched) or sched
+                                tracked_callsign, sched,
+                                pin_dep_ts=pin_dep_ts) or sched
                             self._tracked_schedule_cache[tracked_callsign] = sched
 
-                        # Expiry check: if cached arrival time has passed, re-fetch
-                        # AirLabs for delay/actual info before deciding to wipe
-                        if sched:
-                            sched_arr = sched.get("arr_time_utc")
-                            if sched_arr:
-                                try:
-                                    arr_ts = datetime.strptime(
-                                        sched_arr, "%Y-%m-%d %H:%M"
-                                    ).replace(tzinfo=timezone.utc).timestamp()
-                                    if time() > arr_ts + 3600:
-                                        # 1h past cached arrival — re-fetch for delay info
-                                        from utilities.airlabs import get_flight_schedule
-                                        fresh = get_flight_schedule(tracked_callsign)
-                                        if fresh:
-                                            # Pick best available arrival time (actual > estimated > scheduled)
-                                            # Use `or ""` to handle None values from AirLabs JSON nulls
-                                            best_arr = (
-                                                (fresh.get("arr_actual_utc") or "")
-                                                or (fresh.get("arr_estimated_utc") or "")
-                                                or (fresh.get("arr_time_utc") or "")
-                                            )
-                                            if best_arr:
-                                                fresh["arr_time_utc"] = best_arr
-                                                arr_ts = datetime.strptime(
-                                                    best_arr, "%Y-%m-%d %H:%M"
-                                                ).replace(tzinfo=timezone.utc).timestamp()
-                                            # If best_arr is empty, arr_ts retains the value
-                                            # from the original cached schedule above — correct
-                                            self._tracked_schedule_cache[tracked_callsign] = fresh
-                                            tracked_schedule.note_fetched(
-                                                tracked_callsign, fresh)
-                                            sched = fresh
-                                        # arr_ts falls through from the original parse if
-                                        # fresh is None or has no arrival times
-                                        if time() > arr_ts + 7200:
-                                            logger.info(
-                                                f"Tracked flight {tracked_callsign} arrival "
-                                                f"passed >2h ago (never went live) — auto-wiping"
-                                            )
-                                            self._do_auto_wipe()
-                                            sched = None
-                                except (ValueError, TypeError):
-                                    pass
+                        # Arrival-expiry re-fetch: once the arrival we hold has
+                        # passed, buy one more lookup so the decision below sees
+                        # the ACTUAL/estimated arrival and the landed status
+                        # rather than a schedule written before the flight flew.
+                        if sched and not _leg_gone:
+                            arr_ts = best_arrival_ts(sched)
+                            if arr_ts is not None and _now > arr_ts + 3600:
+                                fresh = get_flight_schedule(
+                                    tracked_callsign, pin_dep_ts=pin_dep_ts)
+                                if fresh is LEG_GONE:
+                                    _leg_gone = True
+                                elif fresh:
+                                    self._tracked_schedule_cache[tracked_callsign] = fresh
+                                    tracked_schedule.note_fetched(
+                                        tracked_callsign, fresh)
+                                    sched = fresh
+                                # fresh None == AirLabs failed: keep the cached
+                                # leg and decide on that. Never wipe on a blip.
+
+                        _wipe, _why = tracked_completion_decision(
+                            sched, _leg_gone, pin_dep_ts,
+                            cached_route or self._tracked_route_cached, _now)
+                        if _wipe:
+                            logger.info(
+                                f"Tracked flight {tracked_callsign} complete "
+                                f"({_why}) — auto-wiping")
+                            self._do_auto_wipe()
+                            # `sched` is deliberately NOT cleared: the panel
+                            # keeps this leg for one more poll cycle instead of
+                            # blanking mid-scroll. tracked_flight.json is already
+                            # empty, so the next poll finds nothing to show.
 
                         # Departure delay, when AirLabs published one. See
                         # utilities/airlabs.departure_delay — None means
@@ -1536,6 +1690,82 @@ class Overhead:
             with self._lock:
                 self._processing = False
             self._write_processing_flag(False)
+
+    def _enforce_tracked_age_cap(self):
+        """Wipe the tracked flight once it is older than _MAX_TRACKED_HOURS.
+
+        Returns True when it wiped. Touches only TRACKED_FILE — no network —
+        which is why _grab calls it BEFORE the FR24 zone fetch: that fetch can
+        throw the whole poll into the network handler, and that handler keeps
+        the last tracked data on purpose, so a sustained FR24 outage used to
+        preserve a stuck flight past its own hard cap.
+
+        The same reasoning applies to `self._tracked_data`: on the network path
+        nothing later in _grab runs to clear it, so the wipe clears it here.
+        """
+        try:
+            with open(TRACKED_FILE, "r", encoding="utf-8") as f:
+                tf_data = json.load(f)
+            cs = (tf_data.get("callsign") or "").strip().upper()
+            set_ts = tf_data.get("set_ts", 0)
+            if not cs or not set_ts:
+                return False
+            if (time() - set_ts) <= self._MAX_TRACKED_HOURS * 3600:
+                return False
+            logger.info(
+                f"Tracked flight {cs} has been tracked for "
+                f">{self._MAX_TRACKED_HOURS}h — auto-wiping")
+            self._do_auto_wipe()
+            with self._lock:
+                self._tracked_data = None
+                self._new_data = True
+            try:
+                safe_write_json(os.path.join(DATA_DIR, "current_tracked.json"), {})
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _persist_self_pin(self, callsign, sched):
+        """Adopt the resolved leg as the pin for a flight tracked BLIND.
+
+        A callsign typed straight in (no leg chosen in the web UI) has no
+        `scheduled_departure`, so nothing pins its AirLabs lookups and the
+        next-day-leg substitution that leg pinning exists to stop can still
+        happen to it. The first time such a flight resolves to a schedule we
+        write that leg's scheduled departure back to tracked_flight.json, so
+        from the next poll on — and across restarts — it behaves like a flight
+        whose leg was chosen deliberately.
+
+        Returns the pin now in force, or None if nothing could be written.
+        """
+        dep_ts = sched.get("dep_time_ts") if sched else None
+        if not dep_ts:
+            return None
+        try:
+            dep_ts = int(float(dep_ts))
+            with open(TRACKED_FILE, "r", encoding="utf-8") as f:
+                tf = json.load(f)
+            if (tf.get("callsign") or "").strip().upper() != callsign:
+                return None      # the tracked flight changed under us
+            existing = tf.get("scheduled_departure")
+            if existing:
+                return existing  # already pinned; never overwrite the user's leg
+            tf["scheduled_departure"] = dep_ts
+            with open(TRACKED_FILE, "w", encoding="utf-8") as f:
+                json.dump(tf, f)
+            try:
+                os.chmod(TRACKED_FILE, 0o666)
+            except OSError:
+                pass
+            logger.info(
+                f"Tracked {callsign}: self-pinned to the leg departing {dep_ts} "
+                f"({sched.get('dep_time', '?')})")
+            return dep_ts
+        except Exception as e:
+            logger.warning(f"Could not self-pin tracked flight {callsign}: {e}")
+            return None
 
     def _do_auto_wipe(self):
         """Wipe tracked_flight.json and reset all tracking state."""

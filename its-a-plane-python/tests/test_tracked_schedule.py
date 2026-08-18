@@ -263,7 +263,7 @@ class TestCadence:
 
         calls = []
         with patch.object(tracked_schedule, "_dispatch",
-                          side_effect=lambda cs: calls.append(cs)):
+                          side_effect=lambda cs, pin=None: calls.append(cs)):
             # Seed as if a fetch had just happened at the window's start.
             tracked_schedule.note_fetched("UA353", sched, now=start)
             now = start
@@ -395,7 +395,7 @@ class TestNonBlocking:
         started = threading.Event()
         sched = _sched()
 
-        def blocking_fetch(callsign):
+        def blocking_fetch(callsign, pin_dep_ts=None):
             started.set()
             gate.wait(10)
             return _sched(dep_delayed=105, dep_estimated="2026-05-11 20:15")
@@ -430,7 +430,7 @@ class TestNonBlocking:
             with patch.object(tracked_schedule, "run_off_render_core",
                               side_effect=lambda: order.append("affinity")):
                 with patch("utilities.airlabs.get_flight_schedule",
-                           side_effect=lambda cs: order.append("fetch") or _sched()):
+                           side_effect=lambda cs, pin_dep_ts=None: order.append("fetch") or _sched()):
                     tracked_schedule.note_fetched("UA353", _sched(), now=0)
                     tracked_schedule.maybe_refresh("UA353", _sched())
                     settle(tracked_schedule)
@@ -456,7 +456,7 @@ class TestNonBlocking:
         gate = threading.Event()
         calls = []
 
-        def blocking_fetch(callsign):
+        def blocking_fetch(callsign, pin_dep_ts=None):
             calls.append(callsign)
             gate.wait(10)
             return _sched()
@@ -529,7 +529,7 @@ class TestLastGoodOnError:
         calls = []
         try:
             with patch("utilities.airlabs.get_flight_schedule",
-                       side_effect=lambda cs: calls.append(cs) or (_ for _ in ()).throw(
+                       side_effect=lambda cs, pin_dep_ts=None: calls.append(cs) or (_ for _ in ()).throw(
                            RuntimeError("down"))):
                 tracked_schedule.note_fetched("UA353", _sched(), now=0)
                 tracked_schedule.maybe_refresh("UA353", _sched())
