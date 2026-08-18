@@ -26,9 +26,35 @@ STATS_COLOUR    = colours.LIGHT_PINK
 AIRCRAFT_COLOUR = colours.LIGHT_PINK
 CITY_COLOUR     = colours.WHITE
 
+# Departure delay colouring for a pre-departure tracked flight.
+# utilities/airport_status.py grades AIRPORT-WIDE FAA delays at 45/90/120 min;
+# a delay to the ONE flight you are waiting for matters at a smaller size, so
+# the same three-step yellow/orange/red ladder is shifted down.
+DELAY_THRESHOLD_MIN = 15   # below this, not worth the panel width
+_DELAY_BANDS = (
+    (90, colours.LIGHT_RED),
+    (45, colours.LIGHT_ORANGE),
+    (DELAY_THRESHOLD_MIN, colours.LIGHT_YELLOW),
+)
+
 # Cache nearest city result — only recalculate when position changes significantly
 _city_cache = {"lat": None, "lon": None, "result": None}
 _CITY_CACHE_THRESHOLD = 0.01  # ~1km — recalculate when plane moves this far
+
+
+def _delay_colour(minutes):
+    """Colour for a departure delay, or None when it is too small to show."""
+    for threshold, colour in _DELAY_BANDS:
+        if minutes >= threshold:
+            return colour
+    return None
+
+
+def _format_delay(minutes):
+    """'+45m' under an hour, '+1:45' at or above. Kept short for 64px."""
+    if minutes < 60:
+        return f"(+{minutes}m)"
+    return f"(+{minutes // 60}:{minutes % 60:02d})"
 
 
 def _format_altitude(altitude):
@@ -85,16 +111,39 @@ def _build_stats(data):
     Build list of (text, colour) tuples for the stats line.
     Live:      1:23 234mi nr Atlanta B738 FL350↑ 260mph
     Scheduled: Departs 6:30p EWR→LAX
+    Delayed:   Departs 8:15p (+1:45) EWR→LAX  (time + delay in the delay colour)
     """
     parts = []
 
     # Scheduled (pre-departure) — show departure info instead of live stats
     if data.get("is_scheduled"):
-        dep = _format_dep_time(data.get("dep_time", ""))
+        # dep_delay_min is None when AirLabs published no delay information, in
+        # which case this renders exactly as it did before the delay feature.
+        delay_min = data.get("dep_delay_min")
+        delay_colour = _delay_colour(delay_min) if delay_min else None
+        revised = data.get("dep_time_revised") or ""
+
+        # Show the revised time only when we actually have one \u2014 a delay whose
+        # size is known but whose new time is not still shows the scheduled time.
+        dep_src = revised if (delay_colour and revised) else data.get("dep_time", "")
+        dep = _format_dep_time(dep_src)
+
         origin = data.get("origin", "")
         dest = data.get("destination", "")
-        label = f"Departs {dep} {origin}\u2192{dest}" if dep else f"Scheduled {origin}\u2192{dest}"
-        for ch in label:
+
+        if not dep:
+            for ch in f"Scheduled {origin}\u2192{dest}":
+                parts.append((ch, TIME_DIST_COLOUR))
+            return parts
+
+        for ch in "Departs ":
+            parts.append((ch, TIME_DIST_COLOUR))
+        for ch in dep:
+            parts.append((ch, delay_colour or TIME_DIST_COLOUR))
+        if delay_colour:
+            for ch in " " + _format_delay(delay_min):
+                parts.append((ch, delay_colour))
+        for ch in f" {origin}\u2192{dest}":
             parts.append((ch, TIME_DIST_COLOUR))
         return parts
 

@@ -56,6 +56,7 @@ from config import (
 
 from setup import email_alerts
 from utilities.cpu_affinity import run_off_render_core
+from utilities import tracked_schedule
 
 # Lazy imports — folium (used by map_generator) may not be installed in test envs
 map_generator = None
@@ -684,8 +685,13 @@ class Overhead:
     def _preload_cities():
         run_off_render_core()   # keep off the LED refresh core
         try:
-            from utilities.cities import _load
+            from utilities.cities import _load, _build_grid
             _load()
+            # Build the spatial index here too. It is a one-off ~400ms on a Pi 3A+,
+            # and the first lookup is reached from the RENDER THREAD
+            # (trackedstats -> landmarks -> cities), so building it lazily there
+            # would stall a frame exactly once per boot.
+            _build_grid()
         except Exception:
             pass
 
@@ -1073,6 +1079,7 @@ class Overhead:
                     self._tracked_last_eta = None
                     self._tracked_last_data = None
                     self._tracked_schedule_cache.clear()
+                    tracked_schedule.forget()   # keep the refresh cadence in lockstep
                     self._tracked_alt_callsign = ""
                     self._tracked_route_cached = cached_route
                     # Persist set_ts for staleness detection across restarts
@@ -1319,6 +1326,18 @@ class Overhead:
                             sched = get_flight_schedule(tracked_callsign)
                             if sched:
                                 self._tracked_schedule_cache[tracked_callsign] = sched
+                                tracked_schedule.note_fetched(tracked_callsign, sched)
+                        else:
+                            # Already have a schedule — keep it DELAY-AWARE. A
+                            # cached departure time used to be frozen until the
+                            # cached ARRIVAL passed, so a departure delay was
+                            # never picked up. maybe_refresh returns last-good
+                            # immediately and dispatches the AirLabs lookup on a
+                            # worker thread when its adaptive cadence says one is
+                            # due; the new value lands on a later poll.
+                            sched = tracked_schedule.maybe_refresh(
+                                tracked_callsign, sched) or sched
+                            self._tracked_schedule_cache[tracked_callsign] = sched
 
                         # Expiry check: if cached arrival time has passed, re-fetch
                         # AirLabs for delay/actual info before deciding to wipe
@@ -1349,6 +1368,8 @@ class Overhead:
                                             # If best_arr is empty, arr_ts retains the value
                                             # from the original cached schedule above — correct
                                             self._tracked_schedule_cache[tracked_callsign] = fresh
+                                            tracked_schedule.note_fetched(
+                                                tracked_callsign, fresh)
                                             sched = fresh
                                         # arr_ts falls through from the original parse if
                                         # fresh is None or has no arrival times
@@ -1362,21 +1383,27 @@ class Overhead:
                                 except (ValueError, TypeError):
                                     pass
 
+                        # Departure delay, when AirLabs published one. See
+                        # utilities/airlabs.departure_delay — None means
+                        # "AirLabs said nothing", which renders exactly as
+                        # before (scheduled time, no adornment).
+                        _dep_delay_min, _dep_time_revised = None, ""
+                        if sched:
+                            from utilities.airlabs import departure_delay
+                            _dep_delay_min, _dep_time_revised = departure_delay(sched)
+
                         # Track miss count for NOT TRACKABLE status
-                        # Only flag NOT TRACKABLE after scheduled departure has passed
-                        # (avoids false flag for flights set hours before departure)
+                        # Only flag NOT TRACKABLE after the EXPECTED departure has
+                        # passed (avoids false flag for flights set hours before
+                        # departure, and for flights merely running late — see
+                        # tracked_schedule.effective_departure_ts)
                         self._tracked_miss_count += 1
                         _dep_passed = False
                         if sched:
-                            dep_utc = sched.get("dep_time_utc")
-                            if dep_utc:
-                                try:
-                                    dep_ts = datetime.strptime(
-                                        dep_utc, "%Y-%m-%d %H:%M"
-                                    ).replace(tzinfo=timezone.utc).timestamp()
-                                    _dep_passed = time() > dep_ts + 1800  # 30 min after dep
-                                except (ValueError, TypeError):
-                                    pass
+                            dep_ts = tracked_schedule.effective_departure_ts(
+                                sched, _dep_delay_min)
+                            if dep_ts is not None:
+                                _dep_passed = time() > dep_ts + 1800  # 30 min after dep
 
                         if sched:
                             # Convert callsign to ICAO for logo lookup (UA353 → UAL353)
@@ -1395,6 +1422,10 @@ class Overhead:
                                 "origin": _clean_code(sched.get("origin", "")),
                                 "destination": _clean_code(sched.get("destination", "")),
                                 "dep_time": sched.get("dep_time", ""),
+                                # Mirror contract: display.html renders these two
+                                # alongside dep_time for the delay-aware line.
+                                "dep_time_revised": _dep_time_revised,
+                                "dep_delay_min": _dep_delay_min,
                                 "arr_time": sched.get("arr_time", ""),
                                 "schedule_status": sched.get("status", ""),
                                 "aircraft_type": "",
@@ -1523,6 +1554,7 @@ class Overhead:
         self._tracked_last_eta = None
         self._tracked_last_data = None
         self._tracked_schedule_cache.clear()
+        tracked_schedule.forget()   # keep the refresh cadence in lockstep
         self._tracked_last_callsign = ""
         self._tracked_alt_callsign = ""
         self._tracked_route_cached = None

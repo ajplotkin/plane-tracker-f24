@@ -187,9 +187,18 @@ const SEA_ICON = ['......', '.##..#', '#..##.', '.##..#', '#..##.'];   // double
 const POOL_ICON = ['#....#', '######', '#....#', '######', '.####.'];  // ladder
 const TIDE_UP_ICON = ['.#..', '###.', '.#..', '.#..', '.#..'];         // high tide
 const TIDE_DOWN_ICON = ['.#..', '.#..', '.#..', '###.', '.#..'];       // low tide
+const BEACH_FLAG_ICON = ['#.....', '######', '#####.', '####..', '#.....'];  // pennant on pole
 // type -> [icon, number-x]  (6px water icons at x44, 4px tide arrows flush at x40)
 const ROTATION_ICON = {water: [SEA_ICON, 44], water_fb: [SEA_ICON, 44],
-    pool: [POOL_ICON, 44], high: [TIDE_UP_ICON, 40], low: [TIDE_DOWN_ICON, 40]};
+    pool: [POOL_ICON, 44], pool_heat: [POOL_ICON, 44], pool_cool: [POOL_ICON, 44],
+    high: [TIDE_UP_ICON, 40], low: [TIDE_DOWN_ICON, 40],
+    beach_green: [BEACH_FLAG_ICON, 44], beach_yellow: [BEACH_FLAG_ICON, 44], beach_red: [BEACH_FLAG_ICON, 44]};
+// Trailing indicator at x56 (must match scenes/date.py): flame while heating, a
+// down arrow while declining (heater off, or pump off).
+const FLAME_ICON = ['..#...', '.###..', '.###..', '#####.', '.###..'];
+const POOL_COOL_ICON = ['.#..', '.#..', '.#..', '###.', '.#..'];
+const HEATING_TYPES = {pool_heat: 1};
+const COOLING_TYPES = {pool_cool: 1};
 // AQI haze glyph (must match scenes/temperature.py AQI_HAZE_ICON), replaces "A"
 const AQI_HAZE_ICON = ['....', '#.#.', '.#.#', '#.#.', '....'];
 
@@ -215,6 +224,7 @@ const C = {
     lightRed:'#ef5251',      // LIGHT_RED (239,82,81)
     lightMidGreen:'#67ba6a', // LIGHT_MID_GREEN (103,186,106)
     lightYellow:'#feef58',   // LIGHT_YELLOW (254,239,88)
+    lightOrange:'#fea727',   // LIGHT_ORANGE (254,167,39)
     lightMidOrange:'#ff8d35',// LIGHT_MID_ORANGE (255,141,53)
     lightDarkBlue:'#5c6bc0', // LIGHT_DARK_BLUE (92,107,192)
     lightTeal:'#26c6da',     // LIGHT_TEAL (38,198,218)
@@ -464,6 +474,12 @@ function drawDate(suppressDate) {
         low: C.tideLow,
         water: C.waterTemp,
         water_fb: '#64a0c8',
+        pool: '#00bfff',
+        pool_heat: '#00bfff',
+        pool_cool: '#00bfff',
+        beach_green: '#00c800',
+        beach_yellow: '#ffbe00',
+        beach_red: '#ff2d2d',
     };
 
     if (item.type === 'date') {
@@ -488,6 +504,17 @@ function drawDate(suppressDate) {
             for (let c = 0; c < icon[r].length; c++)
                 if (icon[r][c] === '#') ctx.fillRect((36 + c) * S, (6 + r) * S, S, S);
         text(item.text, numX, 11, col, XS_W);
+        if (HEATING_TYPES[item.type]) {          // heater running: orange flame at x56
+            ctx.fillStyle = '#ff8a1e';
+            for (let r = 0; r < FLAME_ICON.length; r++)
+                for (let c = 0; c < FLAME_ICON[r].length; c++)
+                    if (FLAME_ICON[r][c] === '#') ctx.fillRect((56 + c) * S, (6 + r) * S, S, S);
+        } else if (COOLING_TYPES[item.type]) {   // declining: ice-blue down arrow at x56
+            ctx.fillStyle = '#78c8ff';
+            for (let r = 0; r < POOL_COOL_ICON.length; r++)
+                for (let c = 0; c < POOL_COOL_ICON[r].length; c++)
+                    if (POOL_COOL_ICON[r][c] === '#') ctx.fillRect((56 + c) * S, (6 + r) * S, S, S);
+        }
     } else {
         text(item.text, 36, 11, colorMap[item.type] || C.grey, XS_W);
     }
@@ -858,11 +885,23 @@ function drawTracked() {
     // --- Line 3: Stats (y=31) — scrolling time, distance, aircraft, altitude, speed ---
     let sSegs = [];
     if (t.is_scheduled && !t.is_live) {
-        // D5: whole scheduled line in TIME_DIST_COLOUR (trackedstats.py:96-98)
-        // dep_time is "2026-07-01 18:30" — format per trackedstats.py:59-80,
-        // dropping ":00" minutes in 12hr mode ("6p" not "6:00p")
+        // D5: scheduled line in TIME_DIST_COLOUR (trackedstats.py _build_stats),
+        // except the departure time + delay chip, which take the delay colour.
+        // dep_delay_min / dep_time_revised come from utilities/airlabs
+        // departure_delay() via overhead.py (mirror contract). dep_delay_min is
+        // null when AirLabs published nothing — then this renders as before.
+        // Bands mirror trackedstats.py _DELAY_BANDS / DELAY_THRESHOLD_MIN.
+        const dMin = t.dep_delay_min || 0;
+        const dCol = dMin >= 90 ? C.lightRed
+                   : dMin >= 45 ? C.lightOrange
+                   : dMin >= 15 ? C.lightYellow
+                   : null;
+        const revised = t.dep_time_revised || '';
+        const depSrc = (dCol && revised) ? revised : (t.dep_time || '');
+        // dep_time is "2026-07-01 18:30" — format per trackedstats.py
+        // _format_dep_time, dropping ":00" minutes in 12hr mode ("6p" not "6:00p")
         let depStr = '';
-        const dtParts = (t.dep_time || '').split(' ');
+        const dtParts = depSrc.split(' ');
         if (dtParts.length >= 2) {
             const hm = dtParts[1].split(':');
             const dh = parseInt(hm[0], 10);
@@ -877,13 +916,24 @@ function drawTracked() {
                     depStr = dh + ':' + String(dm).padStart(2,'0');
                 }
             } else {
-                depStr = t.dep_time;
+                depStr = depSrc;
             }
         }
-        const label = depStr
-            ? 'Departs ' + depStr + ' ' + (t.origin || '') + '→' + (t.destination || '')
-            : 'Scheduled ' + (t.origin || '') + '→' + (t.destination || '');
-        sSegs.push({t: label, c: C.loTemp});
+        if (!depStr) {
+            sSegs.push({t: 'Scheduled ' + (t.origin || '') + '→' + (t.destination || ''),
+                        c: C.loTemp});
+        } else {
+            sSegs.push({t: 'Departs ', c: C.loTemp});
+            sSegs.push({t: depStr, c: dCol || C.loTemp});
+            if (dCol) {
+                // trackedstats.py _format_delay: '(+45m)' under an hour, '(+1:45)' at/above
+                const dTxt = dMin < 60
+                    ? '(+' + dMin + 'm)'
+                    : '(+' + Math.floor(dMin / 60) + ':' + String(dMin % 60).padStart(2, '0') + ')';
+                sSegs.push({t: ' ' + dTxt, c: dCol});
+            }
+            sSegs.push({t: ' ' + (t.origin || '') + '→' + (t.destination || ''), c: C.loTemp});
+        }
     } else if (t.is_live) {
         // Live: "1:23 234mi B738 FL350↑ 260knts"
         if (t.time_remaining) sSegs.push({t: t.time_remaining + ' ', c: C.loTemp});

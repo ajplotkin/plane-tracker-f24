@@ -16,6 +16,7 @@ Usage:
 
 import logging
 import os
+from datetime import datetime, timedelta
 from time import time
 
 import requests
@@ -140,24 +141,10 @@ def get_flight_schedule(callsign):
         upcoming.sort(key=lambda s: s.get("dep_time_ts", 0))
         best = upcoming[0]
 
-        result = {
-            "origin": best.get("dep_iata", ""),
-            "destination": best.get("arr_iata", ""),
-            "dep_time": best.get("dep_time", ""),
-            "dep_time_utc": best.get("dep_time_utc", ""),
-            "arr_time": best.get("arr_time", ""),
-            "arr_time_utc": best.get("arr_time_utc", ""),
-            "arr_estimated_utc": best.get("arr_estimated_utc", ""),
-            "arr_actual_utc": best.get("arr_actual_utc", ""),
-            "status": best.get("status", ""),
-            "airline_iata": best.get("airline_iata", ""),
-            "airline_icao": best.get("airline_icao", ""),
-            "flight_number": best.get("flight_iata", callsign),
-            "flight_icao": best.get("flight_icao", ""),
-            "cs_airline_iata": best.get("cs_airline_iata", ""),  # Operating carrier IATA (e.g., YX=Republic)
-            "dep_time_ts": best.get("dep_time_ts"),              # Scheduled departure unix timestamp
-            "duration": best.get("duration"),
-        }
+        # Single construction path — see _build_result. This used to be an
+        # inline duplicate of that dict, so any field added to one silently
+        # missed the other.
+        result = _build_result(best, callsign)
         logger.info(f"AirLabs: Found {result['flight_number']} {result['origin']}→{result['destination']} status={result['status']}")
         _cache[callsign] = (result, time())
         return result
@@ -242,12 +229,146 @@ def _build_result(best, callsign):
         "arr_time_utc": best.get("arr_time_utc", ""),
         "arr_estimated_utc": best.get("arr_estimated_utc", ""),
         "arr_actual_utc": best.get("arr_actual_utc", ""),
+        # --- Departure-side revisions (see departure_delay) ---
+        "dep_estimated": best.get("dep_estimated", ""),
+        "dep_estimated_utc": best.get("dep_estimated_utc", ""),
+        "dep_estimated_ts": best.get("dep_estimated_ts"),
+        "dep_actual": best.get("dep_actual", ""),
+        "dep_actual_utc": best.get("dep_actual_utc", ""),
+        "dep_actual_ts": best.get("dep_actual_ts"),
+        "dep_delayed": best.get("dep_delayed"),      # minutes
+        "delayed": best.get("delayed"),              # minutes (deprecated by AirLabs)
         "status": best.get("status", ""),
         "airline_iata": best.get("airline_iata", ""),
         "airline_icao": best.get("airline_icao", ""),
         "flight_number": best.get("flight_iata", callsign),
         "flight_icao": best.get("flight_icao", ""),
-        "cs_airline_iata": best.get("cs_airline_iata", ""),
-        "dep_time_ts": best.get("dep_time_ts"),
+        "cs_airline_iata": best.get("cs_airline_iata", ""),  # Operating carrier IATA (e.g., YX=Republic)
+        "dep_time_ts": best.get("dep_time_ts"),              # Scheduled departure unix timestamp
         "duration": best.get("duration"),
     }
+
+
+# --- Departure delay derivation ------------------------------------------
+#
+# AirLabs /schedules documents these departure-side fields (verified against
+# https://airlabs.co/docs/schedules):
+#
+#     dep_estimated / dep_estimated_ts / dep_estimated_utc  updated dep time
+#     dep_actual    / dep_actual_ts    / dep_actual_utc     actual dep time
+#     dep_delayed                                           dep delay, minutes
+#     delayed                                               flight delay, minutes
+#                                                           (marked deprecated)
+#
+# CAVEAT — FREE TIER. The docs annotate only a subset of fields "Available in
+# the Free plan" (airline_iata, flight_iata, flight_number, dep_iata, dep_time,
+# arr_iata, arr_time). NONE of the delay fields above carry that annotation, so
+# on the free key this tracker uses they may simply be absent from the payload.
+# Every field is therefore treated as optional and each source is tried in turn;
+# when they are all missing the result is (None, "") — i.e. exactly the
+# pre-delay behaviour, no invented numbers.
+
+_TIME_FMT = "%Y-%m-%d %H:%M"
+
+
+def _parse_time(value):
+    """Parse an AirLabs 'YYYY-MM-DD HH:MM' string into a naive datetime, or None."""
+    try:
+        return datetime.strptime(value, _TIME_FMT)
+    except (TypeError, ValueError):
+        return None
+
+
+def _shift_time(value, minutes):
+    """Return `value` ('YYYY-MM-DD HH:MM') moved forward by `minutes`, or ''."""
+    dt = _parse_time(value)
+    if dt is None:
+        return ""
+    return (dt + timedelta(minutes=minutes)).strftime(_TIME_FMT)
+
+
+def _minutes_between(rev_ts, base_ts, rev_utc, base_utc, rev_local, base_local):
+    """Minutes from base to revised, using whichever pair AirLabs actually sent.
+
+    Unix timestamps first (unambiguous), then the UTC strings, then the
+    airport-local strings as a last resort — local strings are compared as
+    naive datetimes, which would misreport across a DST change, hence last.
+    Returns None when no usable pair exists.
+    """
+    if rev_ts and base_ts:
+        try:
+            return int((float(rev_ts) - float(base_ts)) // 60)
+        except (TypeError, ValueError):
+            pass
+    for rev, base in ((rev_utc, base_utc), (rev_local, base_local)):
+        rev_dt, base_dt = _parse_time(rev or ""), _parse_time(base or "")
+        if rev_dt and base_dt:
+            return int((rev_dt - base_dt).total_seconds() // 60)
+    return None
+
+
+def _as_minutes(value):
+    """Coerce an AirLabs delay field to int minutes, or None."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def departure_delay(sched):
+    """
+    Derive the departure delay for a schedule dict from get_flight_schedule.
+
+    Returns (delay_minutes, revised_dep_time):
+      delay_minutes    int >= 0 when AirLabs told us something (0 == known
+                       on-time or early), or None when it told us nothing.
+                       None and 0 are deliberately distinct: None means
+                       "unknown", so callers show the scheduled time unadorned.
+      revised_dep_time the revised departure in the DEPARTURE AIRPORT's local
+                       time, formatted like dep_time ('2026-05-11 20:15'),
+                       or '' when there is nothing to revise.
+
+    An early departure is reported as 0 rather than a negative number: the
+    64x32 panel has no room to explain "-10m", and nobody misses a flight for
+    leaving late-listed but early.
+    """
+    if not sched:
+        return None, ""
+
+    sched_local = sched.get("dep_time") or ""
+
+    # 1/2. An explicit revised departure time gives both the delay and the
+    #      exact time to display. Actual beats estimated.
+    for kind in ("actual", "estimated"):
+        delta = _minutes_between(
+            sched.get(f"dep_{kind}_ts"), sched.get("dep_time_ts"),
+            sched.get(f"dep_{kind}_utc"), sched.get("dep_time_utc"),
+            sched.get(f"dep_{kind}"), sched_local,
+        )
+        if delta is None:
+            continue
+        revised = (sched.get(f"dep_{kind}") or "") or _shift_time(sched_local, delta)
+        return max(delta, 0), revised
+
+    # 3. Only a delay duration — derive the revised time from the schedule.
+    #
+    # ONLY dep_delayed. NOT `delayed`: despite the name it is the ARRIVAL delay.
+    # Verified against a live /schedules call for EWR (2026-08-17, 100 rows) — in
+    # every row `delayed` equalled `arr_delayed`, never the departure figure:
+    #
+    #   flight   sched  actual  dep_delayed  arr_delayed  delayed   actual-sched
+    #   UA350    17:50  17:39   None         11           11        -11 (EARLY)
+    #   UA1202   17:55  17:50   None         40           40         -5 (EARLY)
+    #   NZ9123   17:00  17:48   48           81           81        +48
+    #
+    # Falling through to it would announce "+40" for a flight leaving 5 minutes
+    # EARLY. (The docs also mark `delayed` deprecated.)
+    for key in ("dep_delayed",):
+        minutes = _as_minutes(sched.get(key))
+        if minutes is None:
+            continue
+        if minutes <= 0:
+            return 0, sched_local
+        return minutes, _shift_time(sched_local, minutes)
+
+    return None, ""
