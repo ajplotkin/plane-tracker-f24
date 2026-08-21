@@ -147,6 +147,18 @@ class Display(
         self._scroll_epoch_file = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), ".cache", "scroll_epoch.json")
 
+        # Tracked-flight page: ONE position for both lines, same as the main
+        # page above. They used to own a position each (_tr_pos / _ts_pos) and
+        # wrap at their OWN widths, so the shorter line restarted while the
+        # longer one was still running and the two drifted permanently out of
+        # step -- visibly starting and stopping at different moments.
+        self._tracked_scroll_pos = screen.WIDTH
+        self._tracked_widths = {}          # region -> text width in pixels
+        self._tracked_last_number = None   # restart the scroll on a new flight
+        self._tracked_epoch_file = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), ".cache",
+            "tracked_scroll_epoch.json")
+
         # Single Overhead instance handles both zone and tracked flight
         self.overhead = Overhead()
         self.overhead.grab_data()
@@ -207,6 +219,61 @@ class Display(
     def report_scroll_width(self, region, width):
         """Called by each scroll scene to report its text width."""
         self._scroll_widths[region] = width
+
+    def report_tracked_width(self, region, width):
+        """Called by each tracked-page scene to report its text width."""
+        self._tracked_widths[region] = width
+
+    @Animator.KeyFrame.add(0)
+    def reset_tracked_scroll(self):
+        self._tracked_scroll_pos = screen.WIDTH
+        self._tracked_widths = {}
+
+    @Animator.KeyFrame.add(1)
+    def advance_tracked_scroll(self, count):
+        """Single scroll driver for the tracked page. Both lines share one
+        position and wrap together on the WIDEST line, so the shorter one waits
+        rather than lapping the other -- exactly how advance_scroll treats the
+        main page.
+        """
+        # Only while the tracked page is what is on screen: zone flights take
+        # over when _data is non-empty, and ISS takeover blanks both lines.
+        if getattr(self, "_iss_active", False) or len(self._data) > 0:
+            return
+        tracked = self.overhead.tracked_data
+        if not tracked:
+            return
+
+        # New tracked flight: restart rather than inherit the previous flight's
+        # mid-scroll position. reset_scene() only fires on ZONE-flight changes,
+        # so the tracked page has to notice this itself.
+        number = tracked.get("number") or tracked.get("callsign")
+        if number != self._tracked_last_number:
+            self._tracked_last_number = number
+            self._tracked_scroll_pos = screen.WIDTH
+            self._tracked_widths = {}
+            return
+
+        self._tracked_scroll_pos -= 1
+        if not self._tracked_widths:
+            return
+        max_width = max(self._tracked_widths.values())
+        if self._tracked_scroll_pos + max_width < 0:
+            self._tracked_scroll_pos = screen.WIDTH
+            self._write_tracked_epoch(max_width)
+
+    def _write_tracked_epoch(self, max_width):
+        """Cycle start + shared width, so the mirror runs both tracked lines off
+        one clock instead of two independent ones."""
+        try:
+            import json, time, os
+            tmp = f"{self._tracked_epoch_file}.tmp.{os.getpid()}"
+            with open(tmp, "w") as f:
+                json.dump({"ts": time.time(), "width": max_width,
+                           "pos": self._tracked_scroll_pos}, f)
+            os.replace(tmp, self._tracked_epoch_file)
+        except Exception:
+            pass
 
     @Animator.KeyFrame.add(1)
     def advance_scroll(self, count):

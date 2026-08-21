@@ -844,15 +844,11 @@ function drawTracked() {
     // Scroll — use epoch if available, otherwise use tracked data timestamp
     const logoW = 8, logoGap = 2;
     const rW = rSegs.reduce((a,s) => a + s.t.length * SM_W, 0) + logoW + logoGap;
-    // Use per-scene epoch (written each time route scroll wraps on LED)
-    const trEpoch = state.tracked_route_epoch?.ts || t._mirror_ts || serverNow();
-    const trWidth = state.tracked_route_epoch?.width || rW;
-    const trElapsed = serverNow() - trEpoch;
-    const trCyclePx = COLS + trWidth + 1;
-    const trPos = COLS - ((trElapsed * 10) % trCyclePx);
-
-    if (logo) drawImage(logo, trPos, 12, logoW, logoW);
-    textSegs(rSegs, trPos + logoW + logoGap, 19, SM_W);
+    // Route line 1 is DRAWN further down, once the stats width is known —
+    // both tracked lines share one scroll position on the LED
+    // (Display.advance_tracked_scroll) and must share one here too. Nothing
+    // between here and there touches rows 12-19, so deferring the draw is
+    // purely a reordering.
 
     // --- Line 2: Progress bar (y=22) ---
     // D4: trackedprogress.py — full-width bar (barStart=0, barW=64),
@@ -932,7 +928,6 @@ function drawTracked() {
                     : '(+' + Math.floor(dMin / 60) + ':' + String(dMin % 60).padStart(2, '0') + ')';
                 sSegs.push({t: ' ' + dTxt, c: dCol});
             }
-            sSegs.push({t: ' ' + (t.origin || '') + '→' + (t.destination || ''), c: C.loTemp});
         }
     } else if (t.is_live) {
         // Live: "1:23 234mi B738 FL350↑ 260knts"
@@ -972,16 +967,27 @@ function drawTracked() {
         }
     }
 
-    if (sSegs.length > 0) {
-        const sW = sSegs.reduce((a,s) => a + s.t.length * SM_W, 0);
-        // Use per-scene epoch (written each time stats scroll wraps on LED)
-        const tsEpoch = state.tracked_stats_epoch?.ts || t._mirror_ts || serverNow();
-        const tsWidth = state.tracked_stats_epoch?.width || sW;
-        const tsElapsed = serverNow() - tsEpoch;
-        const tsCyclePx = COLS + tsWidth + 1;
-        const tsPos = COLS - ((tsElapsed * 10) % tsCyclePx);
-        textSegs(sSegs, tsPos, 31, SM_W);
-    }
+    // ── ONE clock for BOTH tracked lines ───────────────────────────────────
+    // The LED shares a single position and wraps on the WIDEST line, so two
+    // clocks here would drift the mirror off the panel and off each other —
+    // the bug this fixes. `width` in the epoch is already that max.
+    //
+    // The fallback matters more than it looks: the epoch is DELETED on every
+    // tracked-flight change (overhead.py) and at ISS pass end (isspass.py) so
+    // the mirror cannot extrapolate a new cycle from a stale ts. Until the next
+    // wrap rewrites it there is no epoch, so the fallback must also use the max
+    // of the two widths — a per-line fallback would let them lap each other for
+    // a whole cycle after every flight change.
+    const sW = sSegs.reduce((a,s) => a + s.t.length * SM_W, 0);
+    const tEp = state.tracked_scroll_epoch || {};
+    const tEpoch = tEp.ts || t._mirror_ts || serverNow();
+    const tWidth = tEp.width || Math.max(rW, sW);
+    const tCyclePx = COLS + tWidth + 1;
+    const tPos = COLS - (((serverNow() - tEpoch) * 10) % tCyclePx);
+
+    if (logo) drawImage(logo, tPos, 12, logoW, logoW);
+    textSegs(rSegs, tPos + logoW + logoGap, 19, SM_W);
+    if (sSegs.length > 0) textSegs(sSegs, tPos, 31, SM_W);
 }
 
 // ── ISS Pass Scene ──────────────────────────────────────────────────────

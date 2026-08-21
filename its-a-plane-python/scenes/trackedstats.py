@@ -143,8 +143,14 @@ def _build_stats(data):
         if delay_colour:
             for ch in " " + _format_delay(delay_min):
                 parts.append((ch, delay_colour))
-        for ch in f" {origin}\u2192{dest}":
-            parts.append((ch, TIME_DIST_COLOUR))
+        # No origin\u2192dest here: scenes/trackedroute.py already draws the route
+        # on line 1, so it was rendered twice on the same screen.
+        #
+        # NOT journey.py — that is the ZONE-flight route line and it returns
+        # immediately when len(self._data) == 0, which is precisely the state
+        # the tracked page renders in, so it never draws here at all. Both
+        # tracked lines use fonts.small (5x8); the duplication was plain
+        # repetition, not a size mismatch.
         return parts
 
     # Time remaining
@@ -211,13 +217,6 @@ def _build_stats(data):
 class TrackedStatsScene(object):
     def __init__(self):
         super().__init__()
-        self._ts_pos = screen.WIDTH
-        self._ts_len = 0
-        self._ts_last_number = None
-
-    @Animator.KeyFrame.add(0)
-    def reset_tracked_stats_scroll(self):
-        self._ts_pos = screen.WIDTH
         self._ts_len = 0
 
     @Animator.KeyFrame.add(1)
@@ -231,39 +230,22 @@ class TrackedStatsScene(object):
         if not tracked:
             return
 
-        # New tracked flight: restart the scroll (reset_scene only fires on
-        # zone-flight changes, not tracked-flight changes).
-        _num = tracked.get("number") or tracked.get("callsign")
-        if _num != self._ts_last_number:
-            self._ts_pos = screen.WIDTH
-            self._ts_len = 0
-            self._ts_last_number = _num
-
         char_list = _build_stats(tracked)
 
         # Clear row
         self.draw_square(0, LINE3_Y - 6, screen.WIDTH, LINE3_Y, colours.BLACK)
 
-        # Draw scrolling text
+        # Draw at the SHARED tracked scroll position (see
+        # Display.advance_tracked_scroll) so this line stays in step with the
+        # route line above. Advancing and wrapping belong to that driver; this
+        # scene only reports how wide it is.
         total_len = 0
         for ch, colour in char_list:
             w = graphics.DrawText(
                 self.canvas, FONT,
-                self._ts_pos + total_len, LINE3_Y,
+                self._tracked_scroll_pos + total_len, LINE3_Y,
                 colour, ch,
             )
             total_len += w
         self._ts_len = total_len
-
-        self._ts_pos -= 1
-
-        if self._ts_pos + self._ts_len < 0:
-            self._ts_pos = screen.WIDTH
-            # Write epoch for display mirror scroll sync
-            try:
-                import json, time, os
-                cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cache")
-                with open(os.path.join(cache_dir, "tracked_stats_epoch.json"), "w") as f:
-                    json.dump({"ts": time.time(), "width": self._ts_len}, f)
-            except Exception:
-                pass
+        self.report_tracked_width("tracked_stats", self._ts_len)

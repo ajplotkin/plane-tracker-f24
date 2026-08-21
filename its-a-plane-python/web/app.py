@@ -525,7 +525,7 @@ def api_config_get():
     """Return current config as JSON. Masks secret values."""
     import config as cfg
 
-    SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY", "NPS_API_KEY", "OWM_API_KEY"}
+    SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY", "NPS_API_KEY", "OWM_API_KEY", "HA_TOKEN"}
 
     result = {}
     # Flat env-style keys the UI expects
@@ -546,11 +546,14 @@ def api_config_get():
         "EMAIL",
         "ATC_ENABLED", "ATC_MODE", "ATC_STATION", "ATC_VOLUME", "ATC_OUTPUT",
         "ATC_AUTO_RESUME", "ATC_QUIET_HOURS", "ATC_CUSTOM_FEEDS",
+        "POOL_TEMP_ENABLED", "HA_BASE_URL", "HA_TOKEN", "POOL_TEMP_ENTITY", "POOL_HEATING_ENTITY", "POOL_PUMP_ENTITY",
         "AQI_ALERTS_ENABLED", "AQI_THRESHOLD",
+        "BEACH_REPORT_ENABLED", "BEACH_REPORT_URL",
     ]:
         # Return resolved booleans for checkbox fields
         if key in {"NIGHT_BRIGHTNESS", "HAT_PWM_ENABLED", "NWS_ALERTS_ENABLED", "ISS_ALERTS_ENABLED",
-                   "HOURLY_CHIME_ENABLED", "ATC_ENABLED", "ATC_AUTO_RESUME", "AQI_ALERTS_ENABLED", "WATER_TEMP_FALLBACK_ENABLED"}:
+                   "HOURLY_CHIME_ENABLED", "ATC_ENABLED", "ATC_AUTO_RESUME", "POOL_TEMP_ENABLED",
+                   "AQI_ALERTS_ENABLED", "WATER_TEMP_FALLBACK_ENABLED", "BEACH_REPORT_ENABLED"}:
             result[key] = getattr(cfg, key, False)
             continue
         val = cfg._get(key)
@@ -594,7 +597,9 @@ _VALID_CONFIG_KEYS = {
     "ATC_AUTO_RESUME", "ATC_QUIET_HOURS", "ATC_CUSTOM_FEEDS",
     "HOURLY_CHIME_ENABLED", "HOURLY_CHIME_VOLUME",
     "HOURLY_CHIME_QUIET_START", "HOURLY_CHIME_QUIET_END",
+    "POOL_TEMP_ENABLED", "HA_BASE_URL", "HA_TOKEN", "POOL_TEMP_ENTITY", "POOL_HEATING_ENTITY", "POOL_PUMP_ENTITY",
     "AQI_ALERTS_ENABLED", "AQI_THRESHOLD",
+    "BEACH_REPORT_ENABLED", "BEACH_REPORT_URL",
 }
 
 
@@ -618,7 +623,7 @@ def api_config_post():
     # real API keys with their masks and break auth. The JS strips these too,
     # but the server must not rely on that being the only writer.
     _SECRET_KEYS = {"FR24_API_KEY", "TOMORROW_API_KEY", "AIRLABS_API_KEY",
-                    "NPS_API_KEY", "OWM_API_KEY"}
+                    "NPS_API_KEY", "OWM_API_KEY", "HA_TOKEN"}
     data = {k: v for k, v in data.items()
             if not (k in _SECRET_KEYS and isinstance(v, str) and "*" in v)}
     if not data:
@@ -1258,8 +1263,10 @@ def api_display_state():
 
     # --- Scroll epochs (written by display loop / overhead.py) ---
     scroll_epoch = load_json(os.path.join(CACHE_DIR, "scroll_epoch.json"), {})
-    tracked_route_epoch = load_json(os.path.join(CACHE_DIR, "tracked_route_epoch.json"), {})
-    tracked_stats_epoch = load_json(os.path.join(CACHE_DIR, "tracked_stats_epoch.json"), {})
+    # One epoch for BOTH tracked lines — they share a scroll position now, so
+    # two independent clocks would put the mirror back out of step.
+    tracked_scroll_epoch = load_json(
+        os.path.join(CACHE_DIR, "tracked_scroll_epoch.json"), {})
 
     # --- ISS ---
     iss_data = load_json(os.path.join(CACHE_DIR, "iss.json"), {})
@@ -1323,8 +1330,7 @@ def api_display_state():
         "tides": tide_data,
         "date_display": date_display,
         "scroll_epoch": scroll_epoch,
-        "tracked_route_epoch": tracked_route_epoch,
-        "tracked_stats_epoch": tracked_stats_epoch,
+        "tracked_scroll_epoch": tracked_scroll_epoch,
         "iss_passes": iss_passes,
         "tracked": tracked,
         "alerts_cache": alerts_cache,  # {alerts, slot, cycle_secs, ts}

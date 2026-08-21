@@ -603,8 +603,12 @@ class TestRendering:
         assert "18:30" not in delayed and "6:30p" not in delayed
         assert "(+1:45)" in delayed
         assert "(+" not in on_time
-        # Route survives either way
-        assert "EWR→LAX" in on_time and "EWR→LAX" in delayed
+        # The route must NOT appear here: scenes/trackedroute.py already draws
+        # it on line 1 of the same screen. (journey.py does not — it bails when
+        # len(self._data) == 0, which is the tracked page's own condition.)
+        # Only the "Scheduled" branch keeps it, because that branch has no time
+        # and would otherwise carry no information at all.
+        assert "EWR→LAX" not in on_time and "EWR→LAX" not in delayed
 
     def test_short_delay_uses_minutes_format(self):
         from scenes.trackedstats import _build_stats
@@ -650,7 +654,10 @@ class TestRendering:
         with_nulls = _build_stats(dict(
             self.BASE, dep_delay_min=None, dep_time_revised=""))
         assert _text(before) == _text(with_nulls)
-        assert _text(before) == "Departs 18:30 EWR→LAX" or "Departs" in _text(before)
+        # Pin the WHOLE line, in whichever clock format is configured. The old
+        # form was `== "..." or "Departs" in _text(before)`, whose right-hand
+        # side is true of almost any output, so it passed regardless.
+        assert _text(before) in ("Departs 18:30", "Departs 6:30p"), _text(before)
 
     def test_known_on_time_is_not_treated_as_delayed(self):
         from scenes.trackedstats import _build_stats

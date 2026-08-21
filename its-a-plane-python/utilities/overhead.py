@@ -1321,20 +1321,25 @@ class Overhead:
 
                     if just_became_live:
                         # A new tracked flight just went airborne — clear the
-                        # PREVIOUS flight's route/stats scroll epochs so the
-                        # mirror uses a fresh client-side epoch for the first
-                        # cycle instead of the stale ts (which gave the wrong
-                        # scroll phase). The scenes rewrite them on the next
-                        # wrap. (The old tracked_scroll_epoch.json write here was
-                        # dead — nothing ever read that file.)
+                        # PREVIOUS flight's scroll epoch so the mirror starts a
+                        # fresh client-side cycle instead of extrapolating from
+                        # a stale ts (which gave the wrong scroll phase). The
+                        # driver rewrites it on the next wrap.
+                        #
+                        # ONE file: both tracked lines share a scroll position
+                        # (Display.advance_tracked_scroll), so they share an
+                        # epoch. This used to name tracked_route_epoch.json and
+                        # tracked_stats_epoch.json; when the lines were unified
+                        # those stopped being written, and deleting them became
+                        # a no-op that left the real epoch stale — the exact
+                        # wrong-phase bug this block exists to prevent.
                         try:
                             _cache_dir = os.path.join(BASE_DIR, ".cache")
-                            for _stale in ("tracked_route_epoch.json",
-                                           "tracked_stats_epoch.json"):
-                                try:
-                                    os.remove(os.path.join(_cache_dir, _stale))
-                                except OSError:
-                                    pass
+                            try:
+                                os.remove(os.path.join(
+                                    _cache_dir, "tracked_scroll_epoch.json"))
+                            except OSError:
+                                pass
                         except Exception:
                             pass
                         # First airborne detection — cache route data.

@@ -166,6 +166,17 @@ class ISSPassScene(object):
                 # Refresh the mirror's scroll sync: ts/pos were frozen for
                 # the whole takeover, and iss_plane_shown just flipped.
                 self._write_scroll_epoch()
+                # Same problem on the tracked page, which reset_scene() above
+                # just restarted at x=WIDTH. Its epoch cannot be rewritten here
+                # (reset_tracked_scroll cleared the widths it would need), so
+                # drop it and let the mirror run on a fresh client-side epoch
+                # until the next wrap — otherwise it extrapolates the new cycle
+                # from the pre-takeover ts and shows the wrong phase.
+                try:
+                    import os as _os
+                    _os.remove(self._tracked_epoch_file)
+                except OSError:
+                    pass
             return
 
         self._iss_was_active = True

@@ -66,16 +66,9 @@ def _draw_logo_at(canvas, image, x, y_top):
 class TrackedRouteScene(object):
     def __init__(self):
         super().__init__()
-        self._tr_pos = screen.WIDTH
         self._tr_len = 0
         self._tr_logo = None
         self._tr_last_icao = None
-        self._tr_last_number = None
-
-    @Animator.KeyFrame.add(0)
-    def reset_tracked_route_scroll(self):
-        self._tr_pos = screen.WIDTH
-        self._tr_len = 0
 
     @Animator.KeyFrame.add(1)
     def tracked_route(self, count):
@@ -90,14 +83,6 @@ class TrackedRouteScene(object):
 
         airline_name = tracked.get("airline_name", "")
         number       = tracked.get("number", tracked.get("callsign", ""))
-        # New tracked flight: restart the scroll rather than inherit the
-        # previous flight's mid-scroll position/length. reset_scene() (which
-        # runs reset_tracked_route_scroll) only fires on zone-flight changes,
-        # not tracked-flight changes.
-        if number != self._tr_last_number:
-            self._tr_pos = screen.WIDTH
-            self._tr_len = 0
-            self._tr_last_number = number
         # Extract just the numeric part e.g. "UA1583" -> "1583"
         flight_num   = ''.join(ch for ch in number if ch.isnumeric())
         display_name = f"{airline_name} {flight_num}".strip() if airline_name else number
@@ -144,8 +129,10 @@ class TrackedRouteScene(object):
         # Clear row
         self.draw_square(0, LINE1_Y - LOGO_SIZE + 1, screen.WIDTH, LINE1_Y, colours.BLACK)
 
-        # Draw logo at scroll position (scrolls with text)
-        logo_x = self._tr_pos
+        # Draw logo at the SHARED tracked scroll position (see
+        # Display.advance_tracked_scroll) so this line stays in step with the
+        # stats line below instead of wrapping on its own width.
+        logo_x = self._tracked_scroll_pos
         y_top  = LINE1_Y - LOGO_SIZE + 1
         _draw_logo_at(self.canvas, self._tr_logo, logo_x, y_top)
 
@@ -160,18 +147,7 @@ class TrackedRouteScene(object):
             )
             total_len += w
 
-        # Total scrollable width = logo + gap + text
+        # Total scrollable width = logo + gap + text. Advancing and wrapping
+        # are the shared driver's job now; this scene only reports its width.
         self._tr_len = LOGO_SIZE + LOGO_GAP + total_len
-
-        self._tr_pos -= 1
-
-        if self._tr_pos + self._tr_len < 0:
-            self._tr_pos = screen.WIDTH
-            # Write epoch for display mirror scroll sync
-            try:
-                import json, time, os
-                cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cache")
-                with open(os.path.join(cache_dir, "tracked_route_epoch.json"), "w") as f:
-                    json.dump({"ts": time.time(), "width": self._tr_len}, f)
-            except Exception:
-                pass
+        self.report_tracked_width("tracked_route", self._tr_len)
