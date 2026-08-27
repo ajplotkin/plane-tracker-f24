@@ -16,7 +16,7 @@ sudo chmod +x /var/lib/homebridge/scripts/atc-*.sh
 
 If Homebridge runs on a DIFFERENT host than the tracker, edit the scripts and
 replace `localhost:8080` with the tracker Pi's address (e.g.
-`http://100.80.243.112:8080`).
+`http://<tracker-ip-or-hostname>:8080`).
 
 ## homebridge-script2 accessory (matches the nightlight setup)
 
