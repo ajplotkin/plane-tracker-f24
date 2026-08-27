@@ -1547,9 +1547,38 @@ class Overhead:
                         # "AirLabs said nothing", which renders exactly as
                         # before (scheduled time, no adornment).
                         _dep_delay_min, _dep_time_revised = None, ""
+                        _arr_delay_min, _arr_time_revised = None, ""
+                        _dep_rev_ts = _arr_rev_ts = None
                         if sched:
-                            from utilities.airlabs import departure_delay
+                            from utilities.airlabs import (
+                                arrival_delay, departure_delay, local_wall,
+                                revised_ts)
                             _dep_delay_min, _dep_time_revised = departure_delay(sched)
+                            _arr_delay_min, _arr_time_revised = arrival_delay(sched)
+                            # Instants, so the panel and the mirror can also show
+                            # each time in the VIEWER's zone. The two ends are
+                            # independent: a flight can depart in the panel's own
+                            # zone and land in another, or the reverse.
+                            _dep_rev_ts = revised_ts(sched, "dep", _dep_delay_min)
+                            _arr_rev_ts = revised_ts(sched, "arr", _arr_delay_min)
+
+                        # The panel's own wall clock for each of the four times,
+                        # resolved HERE so the panel and the mirror render one
+                        # answer instead of each deriving their own. Each is None
+                        # when it would just repeat the ticket. Both the
+                        # scheduled and revised variants are carried because the
+                        # consumer picks between them on a threshold it owns.
+                        def _lw(ts, ticket):
+                            return local_wall(ts, ticket) if sched else (None, "", "")
+
+                        _dl, _dl_tz, _dl_day = _lw(
+                            sched.get("dep_time_ts") if sched else None,
+                            sched.get("dep_time", "") if sched else "")
+                        _drl, _drl_tz, _drl_day = _lw(_dep_rev_ts, _dep_time_revised)
+                        _al, _al_tz, _al_day = _lw(
+                            sched.get("arr_time_ts") if sched else None,
+                            sched.get("arr_time", "") if sched else "")
+                        _arl, _arl_tz, _arl_day = _lw(_arr_rev_ts, _arr_time_revised)
 
                         # Track miss count for NOT TRACKABLE status
                         # Only flag NOT TRACKABLE after the EXPECTED departure has
@@ -1580,12 +1609,35 @@ class Overhead:
                                 "not_trackable": _dep_passed and self._tracked_miss_count > 20,
                                 "origin": _clean_code(sched.get("origin", "")),
                                 "destination": _clean_code(sched.get("destination", "")),
+                                # Mirror contract: display.html renders the
+                                # revised time and the delay alongside the
+                                # scheduled one, and the *_ts fields let both
+                                # sides render the same instant in the viewer's
+                                # own zone. The bare strings stay the DEPARTURE
+                                # and ARRIVAL airports' local time — the times
+                                # actually printed on the ticket.
                                 "dep_time": sched.get("dep_time", ""),
-                                # Mirror contract: display.html renders these two
-                                # alongside dep_time for the delay-aware line.
+                                "dep_time_ts": sched.get("dep_time_ts"),
+                                "dep_time_local": _dl,
+                                "dep_time_local_tz": _dl_tz,
+                                "dep_time_local_day": _dl_day,
                                 "dep_time_revised": _dep_time_revised,
+                                "dep_time_revised_ts": _dep_rev_ts,
+                                "dep_time_revised_local": _drl,
+                                "dep_time_revised_local_tz": _drl_tz,
+                                "dep_time_revised_local_day": _drl_day,
                                 "dep_delay_min": _dep_delay_min,
                                 "arr_time": sched.get("arr_time", ""),
+                                "arr_time_ts": sched.get("arr_time_ts"),
+                                "arr_time_local": _al,
+                                "arr_time_local_tz": _al_tz,
+                                "arr_time_local_day": _al_day,
+                                "arr_time_revised": _arr_time_revised,
+                                "arr_time_revised_ts": _arr_rev_ts,
+                                "arr_time_revised_local": _arl,
+                                "arr_time_revised_local_tz": _arl_tz,
+                                "arr_time_revised_local_day": _arl_day,
+                                "arr_delay_min": _arr_delay_min,
                                 "schedule_status": sched.get("status", ""),
                                 "aircraft_type": "",
                                 "altitude": 0,

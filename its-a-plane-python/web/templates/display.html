@@ -288,6 +288,38 @@ function textSegs(segs, x, y, charW) {
     return cx - x;
 }
 
+// Mirrors setup/fonts.KERN_5X8. The panel kerns the 5x8 face per glyph, and its
+// kerned width is what goes into tracked_scroll_epoch.json and therefore sets
+// the scroll cycle for BOTH surfaces. Laying the mirror out at a flat charW made
+// its line wider than that cycle, so ~2 characters of the tail were still on
+// screen when the position snapped back — the line was cut about a second early,
+// every cycle. Drawing per glyph keeps the two in step.
+const KERN_5X8 = {' ': -2, '+': 1};
+
+function textKerned(str, x, y, color, charW) {
+    if (!str) return 0;
+    let cx = x;
+    for (const ch of str) {
+        text(ch, cx, y, color, charW);
+        cx += charW + (KERN_5X8[ch] || 0);
+    }
+    return cx - x;
+}
+
+function textSegsKerned(segs, x, y, charW) {
+    let cx = x;
+    for (const s of segs) { cx += textKerned(s.t, cx, y, s.c, charW); }
+    return cx - x;
+}
+
+function widthKerned(segs, charW) {
+    let w = 0;
+    for (const s of segs) {
+        for (const ch of s.t) w += charW + (KERN_5X8[ch] || 0);
+    }
+    return w;
+}
+
 function loadImg(url) {
     if (url in imgCache) return imgCache[url];
     const img = new Image();
@@ -843,7 +875,7 @@ function drawTracked() {
 
     // Scroll — use epoch if available, otherwise use tracked data timestamp
     const logoW = 8, logoGap = 2;
-    const rW = rSegs.reduce((a,s) => a + s.t.length * SM_W, 0) + logoW + logoGap;
+    const rW = widthKerned(rSegs, SM_W) + logoW + logoGap;
     // Route line 1 is DRAWN further down, once the stats width is known —
     // both tracked lines share one scroll position on the LED
     // (Display.advance_tracked_scroll) and must share one here too. Nothing
@@ -887,46 +919,73 @@ function drawTracked() {
         // departure_delay() via overhead.py (mirror contract). dep_delay_min is
         // null when AirLabs published nothing — then this renders as before.
         // Bands mirror trackedstats.py _DELAY_BANDS / DELAY_THRESHOLD_MIN.
-        const dMin = t.dep_delay_min || 0;
-        const dCol = dMin >= 90 ? C.lightRed
-                   : dMin >= 45 ? C.lightOrange
-                   : dMin >= 15 ? C.lightYellow
-                   : null;
-        const revised = t.dep_time_revised || '';
-        const depSrc = (dCol && revised) ? revised : (t.dep_time || '');
-        // dep_time is "2026-07-01 18:30" — format per trackedstats.py
-        // _format_dep_time, dropping ":00" minutes in 12hr mode ("6p" not "6:00p")
-        let depStr = '';
-        const dtParts = depSrc.split(' ');
-        if (dtParts.length >= 2) {
-            const hm = dtParts[1].split(':');
-            const dh = parseInt(hm[0], 10);
-            const dm = hm.length > 1 ? parseInt(hm[1], 10) : 0;
-            if (!isNaN(dh) && !isNaN(dm)) {
-                if (state.clock_format === '12hr') {
-                    const ap = dh < 12 ? 'a' : 'p';
-                    const h12 = dh % 12 || 12;
-                    depStr = dm ? h12 + ':' + String(dm).padStart(2,'0') + ap
-                                : h12 + ap;
-                } else {
-                    depStr = dh + ':' + String(dm).padStart(2,'0');
-                }
-            } else {
-                depStr = depSrc;
+        // Both ends of the journey, each shown as TICKETED (that airport's own
+        // clock) plus — only when it differs — the same instant on the PANEL's
+        // clock. Mirrors trackedstats.py _time_segment / _local_time_text.
+        // Bands mirror _DELAY_BANDS / DELAY_THRESHOLD_MIN.
+        const band = (m) => m >= 90 ? C.lightRed
+                          : m >= 45 ? C.lightOrange
+                          : m >= 15 ? C.lightYellow : null;
+
+        // Format "2026-07-01 18:30" per _format_dep_time, dropping ":00" in 12hr.
+        const hhmm = (src) => {
+            const p2 = (src || '').split(' ');
+            if (p2.length < 2) return '';
+            const hm = p2[1].split(':');
+            const H = parseInt(hm[0], 10), M = hm.length > 1 ? parseInt(hm[1], 10) : 0;
+            if (isNaN(H) || isNaN(M)) return src;
+            if (state.clock_format === '12hr') {
+                const ap = H < 12 ? 'a' : 'p', h12 = H % 12 || 12;
+                return M ? h12 + ':' + String(M).padStart(2, '0') + ap : h12 + ap;
             }
-        }
-        if (!depStr) {
-            sSegs.push({t: 'Scheduled ' + (t.origin || '') + '→' + (t.destination || ''),
+            return H + ':' + String(M).padStart(2, '0');
+        };
+
+        // No timezone arithmetic here any more. The panel's local wall clock
+        // for each time arrives precomputed in the payload (see
+        // utilities/airlabs.local_wall) and is already null when it would just
+        // repeat the ticket. Deriving it here from a single utc_offset_sec
+        // captured at request time was wrong across a DST transition: it
+        // fabricated a "(6:30a EDT)" against an EST arrival needing no
+        // conversion at all, and it could not switch EDT/EST per instant.
+        const seg = (label, ticket, local, localTz, localDay, delayMin, col) => {
+            const shown = hhmm(ticket);
+            if (!shown) return false;
+            sSegs.push({t: label, c: C.loTemp});
+            sSegs.push({t: shown, c: col || C.loTemp});
+            if (local) {
+                sSegs.push({t: ' (', c: C.planeDist});
+                sSegs.push({t: hhmm(local) + (localDay || ''), c: C.white});
+                sSegs.push({t: (localTz ? ' ' + localTz : '') + ')', c: C.planeDist});
+            }
+            if (col && delayMin) {
+                const dTxt = delayMin < 60
+                    ? '+' + delayMin + 'm'
+                    : '+' + Math.floor(delayMin / 60) + ':' + String(delayMin % 60).padStart(2, '0');
+                sSegs.push({t: ' ' + dTxt, c: col});
+            }
+            return true;
+        };
+
+        const dMin = t.dep_delay_min || 0, dCol = band(dMin);
+        const dRev = t.dep_time_revised || '';
+        const dPfx = (dCol && dRev) ? 'dep_time_revised' : 'dep_time';
+        const depOk = seg('Dep ', (dCol && dRev) ? dRev : (t.dep_time || ''),
+                          t[dPfx + '_local'], t[dPfx + '_local_tz'],
+                          t[dPfx + '_local_day'], dMin, dCol);
+        if (!depOk) {
+            sSegs.push({t: 'Scheduled ' + (t.origin || '') + '\u2192' + (t.destination || ''),
                         c: C.loTemp});
         } else {
-            sSegs.push({t: 'Departs ', c: C.loTemp});
-            sSegs.push({t: depStr, c: dCol || C.loTemp});
-            if (dCol) {
-                // trackedstats.py _format_delay: '(+45m)' under an hour, '(+1:45)' at/above
-                const dTxt = dMin < 60
-                    ? '(+' + dMin + 'm)'
-                    : '(+' + Math.floor(dMin / 60) + ':' + String(dMin % 60).padStart(2, '0') + ')';
-                sSegs.push({t: ' ' + dTxt, c: dCol});
+            const aMin = t.arr_delay_min || 0, aCol = band(aMin);
+            const aRev = t.arr_time_revised || '';
+            const mark = sSegs.length;
+            sSegs.push({t: ' ', c: C.loTemp});
+            const aPfx = (aCol && aRev) ? 'arr_time_revised' : 'arr_time';
+            if (!seg('Arr ', (aCol && aRev) ? aRev : (t.arr_time || ''),
+                     t[aPfx + '_local'], t[aPfx + '_local_tz'],
+                     t[aPfx + '_local_day'], aMin, aCol)) {
+                sSegs.length = mark;          // no arrival time — drop the spacer
             }
         }
     } else if (t.is_live) {
@@ -978,7 +1037,7 @@ function drawTracked() {
     // wrap rewrites it there is no epoch, so the fallback must also use the max
     // of the two widths — a per-line fallback would let them lap each other for
     // a whole cycle after every flight change.
-    const sW = sSegs.reduce((a,s) => a + s.t.length * SM_W, 0);
+    const sW = widthKerned(sSegs, SM_W);
     const tEp = state.tracked_scroll_epoch || {};
     const tEpoch = tEp.ts || t._mirror_ts || serverNow();
     const tWidth = tEp.width || Math.max(rW, sW);
@@ -986,8 +1045,8 @@ function drawTracked() {
     const tPos = COLS - (((serverNow() - tEpoch) * 10) % tCyclePx);
 
     if (logo) drawImage(logo, tPos, 12, logoW, logoW);
-    textSegs(rSegs, tPos + logoW + logoGap, 19, SM_W);
-    if (sSegs.length > 0) textSegs(sSegs, tPos, 31, SM_W);
+    textSegsKerned(rSegs, tPos + logoW + logoGap, 19, SM_W);
+    if (sSegs.length > 0) textSegsKerned(sSegs, tPos, 31, SM_W);
 }
 
 // ── ISS Pass Scene ──────────────────────────────────────────────────────

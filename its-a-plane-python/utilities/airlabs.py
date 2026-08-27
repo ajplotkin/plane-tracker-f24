@@ -353,8 +353,14 @@ def _build_result(best, callsign):
         # Unix arrival, when AirLabs sends it — unambiguous where the UTC
         # strings need parsing. overhead.best_arrival_ts falls back to it.
         "arr_time_ts": best.get("arr_time_ts"),
+        # --- Arrival-side revisions (see arrival_delay) ---
+        "arr_estimated": best.get("arr_estimated", ""),
         "arr_estimated_utc": best.get("arr_estimated_utc", ""),
+        "arr_estimated_ts": best.get("arr_estimated_ts"),
+        "arr_actual": best.get("arr_actual", ""),
         "arr_actual_utc": best.get("arr_actual_utc", ""),
+        "arr_actual_ts": best.get("arr_actual_ts"),
+        "arr_delayed": best.get("arr_delayed"),      # minutes
         # --- Departure-side revisions (see departure_delay) ---
         "dep_estimated": best.get("dep_estimated", ""),
         "dep_estimated_utc": best.get("dep_estimated_utc", ""),
@@ -373,6 +379,134 @@ def _build_result(best, callsign):
         "dep_time_ts": best.get("dep_time_ts"),              # Scheduled departure unix timestamp
         "duration": best.get("duration"),
     }
+
+
+def _revision(sched, side):
+    """(kind, delta_minutes) for the revision a {side}_delay would report, or
+    (None, None) when only a duration or nothing at all is available.
+
+    Extracted so revised_ts cannot disagree with the delay functions about WHICH
+    revision is authoritative. It could: revised_ts used to take the first
+    *_ts field present, so a schedule carrying arr_actual as strings only (no
+    arr_actual_ts) plus an arr_estimated_ts made arrival_delay derive its delay
+    and revised time from ACTUAL while revised_ts returned the ESTIMATED
+    instant — the parenthesised local time disagreeing with the ticketed time it
+    annotates, by the gap between the two revisions.
+    """
+    sched_local = sched.get(f"{side}_time") or ""
+    for kind in ("actual", "estimated"):
+        delta = _minutes_between(
+            sched.get(f"{side}_{kind}_ts"), sched.get(f"{side}_time_ts"),
+            sched.get(f"{side}_{kind}_utc"), sched.get(f"{side}_time_utc"),
+            sched.get(f"{side}_{kind}"), sched_local,
+        )
+        if delta is not None:
+            return kind, delta
+    return None, None
+
+
+def revised_ts(sched, side, delay_min):
+    """Unix time of the revised departure/arrival that {side}_delay reported.
+
+    side is "dep" or "arr". Returns None when there is nothing to revise.
+
+    The panel and the mirror both need the revised time as an INSTANT, not just
+    as the origin's or destination's wall clock, so they can also show it in the
+    viewer's own zone. A flight can differ from the panel on one end and match
+    on the other — SEA->EWR needs the departure converted and not the arrival;
+    EWR->LAX is the other way round — so each end carries its own timestamp and
+    is judged separately.
+    """
+    if not sched or delay_min is None:
+        return None
+    kind, _ = _revision(sched, side)
+    if kind:
+        ts = sched.get(f"{side}_{kind}_ts")
+        if ts:
+            try:
+                return float(ts)
+            except (TypeError, ValueError):
+                pass
+    # Either no revision field, or the authoritative one has no usable
+    # timestamp: derive the instant by shifting the schedule, exactly as the
+    # delay functions derive the revised wall time.
+    base = sched.get(f"{side}_time_ts")
+    if not base:
+        return None
+    try:
+        return float(base) + delay_min * 60
+    except (TypeError, ValueError):
+        return None
+
+
+def local_wall(ts, ticket_str):
+    """The panel's own wall clock for an instant, or None when it matches.
+
+    Returns (wall_string, tz_abbrev, day_marker) with wall_string formatted like
+    dep_time/arr_time ("2026-08-21 02:42"), or (None, "", "") when the panel's
+    clock reads the SAME date and time as the ticket — i.e. the two ends are in
+    the same zone and repeating it would be noise.
+
+    Computed HERE, once, and carried in the payload, so the panel and the mirror
+    render one answer instead of each deriving their own. The mirror used to do
+    the arithmetic itself from a single utc_offset_sec captured at request time;
+    that is wrong for any flight on the far side of a DST transition — it showed
+    a fabricated "(6:30a EDT)" against an EST arrival that needed no conversion
+    at all. datetime.fromtimestamp() resolves the offset AT THAT INSTANT, so
+    November flights viewed in October come out right.
+
+    The comparison is on the FULL date and time, not just HH:MM: zones exactly
+    24h apart (Kiritimati UTC+14 against Honolulu UTC-10) read the same clock on
+    different days, and comparing only the time hid both the conversion and the
+    day marker that was the entire point.
+    """
+    if not ticket_str or ts in (None, ""):
+        return None, "", ""
+    try:
+        local = datetime.fromtimestamp(float(ts)).astimezone()
+        ticket = datetime.strptime(ticket_str, "%Y-%m-%d %H:%M")
+    except (ValueError, TypeError, OSError, OverflowError):
+        return None, "", ""
+    wall = local.strftime("%Y-%m-%d %H:%M")
+    if wall == ticket.strftime("%Y-%m-%d %H:%M"):
+        return None, "", ""
+    days = (local.date() - ticket.date()).days
+    return wall, local.strftime("%Z"), (f"{days:+d}" if days else "")
+
+
+def arrival_delay(sched):
+    """
+    Derive the arrival delay for a schedule dict from get_flight_schedule.
+
+    The exact mirror of departure_delay, against the arrival-side fields.
+    Returns (delay_minutes, revised_arr_time) with the same contract: None
+    means AirLabs said nothing, 0 means known on-time-or-early, and the revised
+    time is in the ARRIVAL airport's local time, formatted like arr_time.
+
+    Worth having separately from the departure delay because they diverge in
+    the direction that matters: UA2017 on 2026-08-21 left 44 minutes late and
+    was still estimated to arrive only 22 late, having made up half of it in
+    the air. Showing the departure delay against the arrival time would have
+    overstated it by two-fold.
+    """
+    if not sched:
+        return None, ""
+    sched_local = sched.get("arr_time") or ""
+
+    kind, delta = _revision(sched, "arr")
+    if kind is not None:
+        revised = (sched.get(f"arr_{kind}") or "") or _shift_time(sched_local, delta)
+        return max(delta, 0), revised
+
+    # Only a duration. arr_delayed ONLY — see the note in departure_delay about
+    # why `delayed` is not a safe fallback for either side.
+    minutes = _as_minutes(sched.get("arr_delayed"))
+    if minutes is not None:
+        if minutes <= 0:
+            return 0, sched_local
+        return minutes, _shift_time(sched_local, minutes)
+
+    return None, ""
 
 
 # --- Departure delay derivation ------------------------------------------
@@ -465,22 +599,23 @@ def departure_delay(sched):
 
     # 1/2. An explicit revised departure time gives both the delay and the
     #      exact time to display. Actual beats estimated.
-    for kind in ("actual", "estimated"):
-        delta = _minutes_between(
-            sched.get(f"dep_{kind}_ts"), sched.get("dep_time_ts"),
-            sched.get(f"dep_{kind}_utc"), sched.get("dep_time_utc"),
-            sched.get(f"dep_{kind}"), sched_local,
-        )
-        if delta is None:
-            continue
+    kind, delta = _revision(sched, "dep")
+    if kind is not None:
         revised = (sched.get(f"dep_{kind}") or "") or _shift_time(sched_local, delta)
         return max(delta, 0), revised
 
     # 3. Only a delay duration — derive the revised time from the schedule.
     #
-    # ONLY dep_delayed. NOT `delayed`: despite the name it is the ARRIVAL delay.
-    # Verified against a live /schedules call for EWR (2026-08-17, 100 rows) — in
-    # every row `delayed` equalled `arr_delayed`, never the departure figure:
+    # ONLY dep_delayed. NEVER `delayed`, which is not reliably either figure:
+    #
+    #   2026-08-17, EWR, 100 rows: `delayed` equalled `arr_delayed` in EVERY row.
+    #   2026-08-21, UA2017 SEA-EWR: dep_delayed 44, arr_delayed 22, delayed 44
+    #                               — i.e. the DEPARTURE figure that time.
+    #
+    # So `delayed` tracks whichever AirLabs felt like; the earlier "it is the
+    # arrival delay" reading held for one sample and is not a rule. Both sides
+    # read their own explicit field and nothing else. The 2026-08-17 sample,
+    # which is what makes falling through to it dangerous:
     #
     #   flight   sched  actual  dep_delayed  arr_delayed  delayed   actual-sched
     #   UA350    17:50  17:39   None         11           11        -11 (EARLY)

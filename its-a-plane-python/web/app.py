@@ -1316,6 +1316,10 @@ def api_display_state():
         "ui_version": ui_version,
         # Pi's UTC offset so a remote browser renders the panel's local time
         "utc_offset_sec": _dt.now().astimezone().utcoffset().total_seconds(),
+        # Zone label for the panel-local times on the tracked line, so the
+        # mirror can say "EDT" exactly as the panel does rather than
+        # guessing from the browser, which may be somewhere else entirely.
+        "tz_abbrev": _dt.now().astimezone().strftime("%Z"),
         "processing": processing,      # {processing, ts} — loading pulse
         "iss_live": iss_live,          # {visible, ts} — live theme flips
         "flights": flights,

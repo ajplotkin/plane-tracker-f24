@@ -14,7 +14,8 @@ stretch a bad round-trip well past a minute) used to run on the 10 FPS render
 thread, so any slow round-trip was a visible scroll freeze. They now run in a
 background worker; the getters only decide whether to dispatch one.
 
-Same shape as airport_status.py / rain.py / tides.py: module-level _refresh_lock + _refresh_pending, a
+Same shape as airport_status.py / rain.py / tides.py / pool_temp.py /
+beach_conditions.py: module-level _refresh_lock + _refresh_pending, a
 _dispatch() helper, a _background_* worker that calls run_off_render_core()
 first and clears the pending flag in a finally.
 """
@@ -146,7 +147,7 @@ def _exit_backoff():
 
 # ─── Background refresh plumbing ─────────────────────────────────────────────
 # ONE in-flight worker for the WHOLE module — the realtime (temp/humidity/UV)
-# and forecast fetches share the slot, like tides.py does for
+# and forecast fetches share the slot, like pool_temp.py and tides.py do for
 # their two getters each. Justification:
 #   * They hit the SAME host through the SAME Session (pool_maxsize=2), and the
 #     free tier's 25 req/hour is an ACCOUNT limit, not a per-endpoint one — so

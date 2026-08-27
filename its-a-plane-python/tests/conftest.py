@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 def settle(module, timeout=5.0):
     """Wait for `module`'s background refresh (if one is in flight) to finish.
 
-    The non-blocking fetchers (air_quality, rain,
+    The non-blocking fetchers (beach_conditions, pool_temp, air_quality, rain,
     tides — same pattern as airport_status/nws_alerts/iss) dispatch a worker
     thread and return the LAST GOOD value immediately, so a test that asserts on
     a freshly fetched value has to wait for that worker.

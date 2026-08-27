@@ -119,12 +119,12 @@ def test_every_schedule_cache_wipe_also_clears_the_refresher():
 
 def test_exactly_sixty_minutes_renders_as_an_hour():
     """Boundary the review found unpinned: at exactly 60 the format must switch to
-    h:mm. A mutation of `< 60` to `<= 60` renders (+60m) and nothing caught it."""
+    h:mm. A mutation of `< 60` to `<= 60` renders +60m and nothing caught it."""
     from scenes.trackedstats import _format_delay
-    assert _format_delay(59) == "(+59m)"
-    assert _format_delay(60) == "(+1:00)"
-    assert _format_delay(61) == "(+1:01)"
-    assert _format_delay(125) == "(+2:05)"
+    assert _format_delay(59) == "+59m"
+    assert _format_delay(60) == "+1:00"
+    assert _format_delay(61) == "+1:01"
+    assert _format_delay(125) == "+2:05"
 
 
 def test_unparseable_departure_uses_the_soonest_tier_not_the_slowest():

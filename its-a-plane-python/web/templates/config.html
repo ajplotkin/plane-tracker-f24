@@ -265,17 +265,17 @@
             </div>
             <div class="field">
                 <label>TIDE_STATION</label>
-                <input type="text" id="cfg-TIDE_STATION" placeholder="9414290" />
+                <input type="text" id="cfg-TIDE_STATION" placeholder="8511171" />
                 <span class="hint">NOAA station ID (empty = no tides)</span>
             </div>
             <div class="field">
                 <label>WATER_TEMP_STATION</label>
-                <input type="text" id="cfg-WATER_TEMP_STATION" placeholder="9410230" />
+                <input type="text" id="cfg-WATER_TEMP_STATION" placeholder="8510560" />
                 <span class="hint">NOAA station ID (empty = none)</span>
             </div>
             <div class="field">
                 <label>WATER_TEMP_FALLBACK_STATION</label>
-                <input type="text" id="cfg-WATER_TEMP_FALLBACK_STATION" placeholder="46026" />
+                <input type="text" id="cfg-WATER_TEMP_FALLBACK_STATION" placeholder="44097" />
                 <span class="hint">Backup water-temp source if the primary returns no data. 7-digit = NOAA CO-OPS; &le;5-digit = NDBC buoy. (empty = none)</span>
             </div>
             <div class="checkbox-field">
@@ -439,6 +439,43 @@
         </div>
     </div>
 
+    <!-- Pool Temp (reads a Home Assistant sensor over REST) -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">POOL TEMP</div>
+        <div class="section-body">
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-POOL_TEMP_ENABLED" />
+                <label for="cfg-POOL_TEMP_ENABLED">POOL_TEMP_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Show pool water temp in the alert rotation (reads Home Assistant)</span>
+            </div>
+            <div class="field">
+                <label>HA_BASE_URL</label>
+                <input type="text" id="cfg-HA_BASE_URL" placeholder="http://homeassistant.local:8123" />
+                <span class="hint">Home Assistant base URL (blank = disabled)</span>
+            </div>
+            <div class="field">
+                <label>HA_TOKEN</label>
+                <input type="password" id="cfg-HA_TOKEN" placeholder="HA long-lived access token" />
+                <span class="secret-toggle" onclick="toggleSecret(this)">show</span>
+            </div>
+            <div class="field">
+                <label>POOL_TEMP_ENTITY</label>
+                <input type="text" id="cfg-POOL_TEMP_ENTITY" placeholder="sensor.heat_pump_water_temperature" />
+                <span class="hint">HA sensor entity id (use heat_pump_water_temperature, not chlorsync)</span>
+            </div>
+            <div class="field">
+                <label>POOL_HEATING_ENTITY</label>
+                <input type="text" id="cfg-POOL_HEATING_ENTITY" placeholder="binary_sensor.heat_pump_compressor" />
+                <span class="hint">Optional: a flame shows next to the temp while this is heating. Best signal = the heat pump's compressor binary_sensor ('on' == actively making heat — it can't run without flow). A climate entity's hvac_action=='heating' also works. Blank = off.</span>
+            </div>
+            <div class="field">
+                <label>POOL_PUMP_ENTITY</label>
+                <input type="text" id="cfg-POOL_PUMP_ENTITY" placeholder="binary_sensor.heat_pump_flow" />
+                <span class="hint">Optional circulation/flow entity — use the heat pump's flow switch (binary_sensor.heat_pump_flow), 'on' only when water moves through the heater. Two effects: (1) the pool temp only refreshes while it's 'on' (the temp sensor sits at the heater and reads stagnant water when flow is off); (2) 2nd gate for the flame, must ALSO be 'on'. Blank = temp always refreshes + flame uses the heating entity alone. (Not the filtration pump's speed sensor.)</span>
+            </div>
+        </div>
+    </div>
+
     <!-- Air Quality (US EPA AQI chip by the clock — Open-Meteo, keyless) -->
     <div class="section">
         <div class="section-header" onclick="toggleSection(this)">AIR QUALITY</div>
@@ -452,6 +489,23 @@
                 <label>AQI_THRESHOLD</label>
                 <input type="number" id="cfg-AQI_THRESHOLD" min="0" max="500" placeholder="50" />
                 <span class="hint">Show chip at/above this AQI (0 = always; 50 = Moderate+; 100 = orange+)</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Beach Flag -->
+    <div class="section">
+        <div class="section-header" onclick="toggleSection(this)">BEACH FLAG</div>
+        <div class="section-body">
+            <div class="checkbox-field">
+                <input type="checkbox" id="cfg-BEACH_REPORT_ENABLED" />
+                <label for="cfg-BEACH_REPORT_ENABLED">BEACH_REPORT_ENABLED</label>
+                <span class="hint" style="margin-left:8px">Green/yellow/red flag + swell in the date rotation (East Hampton Town beach report)</span>
+            </div>
+            <div class="field">
+                <label>BEACH_REPORT_URL</label>
+                <input type="text" id="cfg-BEACH_REPORT_URL" placeholder="(built-in East Hampton Town endpoint)" />
+                <span class="hint">Optional: override the beach-report JSON API (/api/surf-data). Blank = the built-in East Hampton URL.</span>
             </div>
         </div>
     </div>
@@ -635,11 +689,13 @@
             'FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY',
             'EMAIL',
             'ATC_ENABLED', 'ATC_QUIET_HOURS', 'ATC_CUSTOM_FEEDS', 'ATC_AUTO_RESUME',
+            'POOL_TEMP_ENABLED', 'HA_BASE_URL', 'HA_TOKEN', 'POOL_TEMP_ENTITY', 'POOL_HEATING_ENTITY', 'POOL_PUMP_ENTITY',
             'AQI_ALERTS_ENABLED', 'AQI_THRESHOLD',
+            'BEACH_REPORT_ENABLED', 'BEACH_REPORT_URL',
         ];
 
-        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME', 'AQI_ALERTS_ENABLED', 'WATER_TEMP_FALLBACK_ENABLED'];
-        const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY'];
+        const CHECKBOX_FIELDS = ['NIGHT_BRIGHTNESS', 'HAT_PWM_ENABLED', 'NWS_ALERTS_ENABLED', 'ISS_ALERTS_ENABLED', 'HOURLY_CHIME_ENABLED', 'ATC_ENABLED', 'ATC_AUTO_RESUME', 'POOL_TEMP_ENABLED', 'AQI_ALERTS_ENABLED', 'WATER_TEMP_FALLBACK_ENABLED', 'BEACH_REPORT_ENABLED'];
+        const SECRET_FIELDS = ['FR24_API_KEY', 'TOMORROW_API_KEY', 'AIRLABS_API_KEY', 'NPS_API_KEY', 'OWM_API_KEY', 'HA_TOKEN'];
         // Fields where an empty value is meaningful ("blank = disabled", or
         // "blank = fall back to the default") and must be sent so the user can
         // actually clear them. Without this, a non-clearable field is dropped
@@ -647,7 +703,9 @@
         // (e.g. JOURNEY_BLANK_FILLER="Unknown") can never be removed via the UI.
         const CLEARABLE_FIELDS = ['TIDE_STATION', 'WATER_TEMP_STATION', 'WATER_TEMP_FALLBACK_STATION', 'AIRPORT_STATUS_LIST',
             'BLOCKED_CALLSIGNS', 'ATC_CUSTOM_FEEDS', 'ATC_QUIET_HOURS',
-            'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END', 'JOURNEY_BLANK_FILLER'];
+            'HOURLY_CHIME_QUIET_START', 'HOURLY_CHIME_QUIET_END',
+            'HA_BASE_URL', 'POOL_TEMP_ENTITY', 'POOL_HEATING_ENTITY', 'POOL_PUMP_ENTITY', 'JOURNEY_BLANK_FILLER',
+            'BEACH_REPORT_URL'];
 
         function toggleSection(header) {
             header.parentElement.classList.toggle('collapsed');

@@ -5,6 +5,17 @@ from utilities.animator import Animator
 from setup import colours, fonts, frames
 from rgbmatrix import graphics
 
+try:
+    from utilities.pool_temp import get_pool_temp, get_pool_status
+except ImportError:
+    get_pool_temp = lambda: None
+    get_pool_status = lambda: None
+
+try:
+    from utilities.beach_conditions import get_beach_conditions
+except ImportError:
+    get_beach_conditions = lambda: None
+
 # Setup
 DATE_FONT = fonts.extrasmall
 DATE_POSITION = (36, 11)
@@ -14,38 +25,56 @@ TIDE_HIGH_COLOUR = graphics.Color(0, 255, 255)     # Cyan
 TIDE_LOW_COLOUR = graphics.Color(66, 164, 244)      # Light blue
 WATER_TEMP_COLOUR = graphics.Color(0, 200, 150)    # Teal
 WATER_TEMP_FALLBACK_COLOUR = graphics.Color(100, 160, 200)  # Blue-grey (fallback indicator)
+POOL_TEMP_COLOUR = graphics.Color(0, 191, 255)     # Pool blue (deep sky blue)
+POOL_HEAT_COLOUR = graphics.Color(255, 138, 30)    # Orange (heater actively running)
+POOL_COOL_COLOUR = graphics.Color(120, 200, 255)   # Ice blue (declining: heater/pump off)
 
-# Sea-temp icon (6px wide, 5px tall), drawn left of the number in the x36-63
-# rotation slot in place of the "Sea " text label — the label left no room for a
-# space, so a coastal reading ran together with the number.
+# Icons drawn at x36 in the x36-63 rotation slot, replacing a text label that
+# left no room for a space. Water temp (6px) replaces "Sea "/"Pool" (so "Pool70°"
+# no longer reads as "170"); tide arrows (4px) replace the H/L letter.
 SEA_ICON = ("......", ".##..#", "#..##.", ".##..#", "#..##.")   # double wave
+POOL_ICON = ("#....#", "######", "#....#", "######", ".####.")  # ladder
 TIDE_UP_ICON = (".#..", "###.", ".#..", ".#..", ".#..")         # high tide (rising)
 TIDE_DOWN_ICON = (".#..", ".#..", ".#..", "###.", ".#..")       # low tide (falling)
-ICON_WIDTH = 6                                        # water icon width
+# Beach flag (EH Town lifeguard report): a pennant on a pole (6px), coloured by the
+# flag — green/yellow/red; the swell height ("3ft") follows it in the same colour.
+BEACH_FLAG_ICON = ("#.....", "######", "#####.", "####..", "#.....")
+BEACH_GREEN  = graphics.Color(0, 200, 0)
+BEACH_YELLOW = graphics.Color(255, 190, 0)
+BEACH_RED    = graphics.Color(255, 45, 45)
+# Flame (6px) trailing the temp at FLAME_X while the pool/spa heater is running;
+# down arrow (same slot) while the pool is declining (heater off, or pump/flow off).
+FLAME_ICON = ("..#...", ".###..", ".###..", "#####.", ".###..")
+POOL_COOL_ICON = (".#..", ".#..", ".#..", "###.", ".#..")   # down arrow (matches falling-tide)
+FLAME_X = 56                                          # fixed; fits after a 2- or 3-digit temp
+ICON_WIDTH = 6                                        # water icon width (sea/pool)
 ICON_Y_TOP = 6                                        # aligns with 4x6 digits (y6-10)
 ICON_NUMBER_X = DATE_POSITION[0] + ICON_WIDTH + 2     # 36 + 6 + 2 = 44 (water)
-# type -> (icon, x where the number/time starts). 6px water leaves a 2px gap (x44);
-# the 4px tide arrows sit flush at x40 so the full "11:07p" time still fits.
+# type -> (icon, x where the number/time starts). 6px water icons leave a 2px gap
+# (x44); the 4px tide arrows sit flush at x40 so the full "11:07p" time still fits.
+# "pool_heat" is the pool item while heating: same ladder + temp, plus a flame.
 _ICON_TYPES = {
-    "water":    (SEA_ICON, ICON_NUMBER_X),
-    "water_fb": (SEA_ICON, ICON_NUMBER_X),
-    "high":     (TIDE_UP_ICON, DATE_POSITION[0] + 4),
-    "low":      (TIDE_DOWN_ICON, DATE_POSITION[0] + 4),
+    "water":     (SEA_ICON, ICON_NUMBER_X),
+    "water_fb":  (SEA_ICON, ICON_NUMBER_X),
+    "pool":      (POOL_ICON, ICON_NUMBER_X),
+    "pool_heat": (POOL_ICON, ICON_NUMBER_X),
+    "pool_cool": (POOL_ICON, ICON_NUMBER_X),
+    "high":      (TIDE_UP_ICON, DATE_POSITION[0] + 4),
+    "low":       (TIDE_DOWN_ICON, DATE_POSITION[0] + 4),
+    "beach_green":  (BEACH_FLAG_ICON, ICON_NUMBER_X),
+    "beach_yellow": (BEACH_FLAG_ICON, ICON_NUMBER_X),
+    "beach_red":    (BEACH_FLAG_ICON, ICON_NUMBER_X),
 }
 _ICON_COLOUR = {
     "water": WATER_TEMP_COLOUR, "water_fb": WATER_TEMP_FALLBACK_COLOUR,
+    "pool": POOL_TEMP_COLOUR, "pool_heat": POOL_TEMP_COLOUR, "pool_cool": POOL_TEMP_COLOUR,
     "high": TIDE_HIGH_COLOUR, "low": TIDE_LOW_COLOUR,
+    "beach_green": BEACH_GREEN, "beach_yellow": BEACH_YELLOW, "beach_red": BEACH_RED,
 }
-
-
-def _draw_slot_icon(canvas, icon, colour):
-    """Draw a small icon at x36 (rows ICON_Y_TOP..+4) — water temp or tide arrow."""
-    x0 = DATE_POSITION[0]
-    for r, row in enumerate(icon):
-        for c, ch in enumerate(row):
-            if ch == "#":
-                canvas.SetPixel(x0 + c, ICON_Y_TOP + r,
-                                colour.red, colour.green, colour.blue)
+# Trailing indicator at FLAME_X: heating types get an orange flame, cooling types a
+# blue down arrow. (Add "spa_heat"/"spa_cool" etc. for a future hot tub.)
+_HEATING_TYPES = {"pool_heat"}
+_COOLING_TYPES = {"pool_cool"}
 
 # Cycle timing: 5 seconds per item (called once per second)
 _CYCLE_SECONDS = 5
@@ -136,16 +165,103 @@ class DateScene(object):
             self._cached_tides = None
         return self._cached_tides
 
+    def _build_rotation_items(self, current_date):
+        """The rotating right-side items: date, then (if available) high/low
+        tide, sea temp, and pool temp. Returns a list of (type, text) tuples;
+        the type drives the colour (in date()) and the mirror colour map."""
+        items = [("date", current_date)]
+
+        tides = self._get_tides()
+        if tides:
+            if tides.get("high"):
+                # Time only; the TIDE_UP_ICON (rising arrow) is drawn to its left.
+                items.append(("high", f"{tides['high']}"))
+            if tides.get("low"):
+                # Time only; the TIDE_DOWN_ICON (falling arrow) is drawn to its left.
+                items.append(("low", f"{tides['low']}"))
+
+        # Beach flag + swell (EH Town lifeguard report) — its own rotation item,
+        # placed here so it lands third from the bottom of the full rotation (before
+        # the sea + pool temps). "beach_<flag>" drives a green/yellow/red pennant;
+        # the text is the swell height ("3ft"). Independent of tides.
+        try:
+            from config import BEACH_REPORT_ENABLED
+        except ImportError:
+            BEACH_REPORT_ENABLED = False
+        if BEACH_REPORT_ENABLED:
+            try:
+                bc = get_beach_conditions()
+            except Exception:
+                bc = None
+            if (bc and bc.get("flag") in ("green", "yellow", "red")
+                    and bc.get("swell_ft") is not None):
+                # Require a swell value: the text must be non-empty (an empty rotation
+                # text defeats the slot-clear guards -> stale pixels). int(sw + 0.5) is
+                # half-up (Python round() is half-to-even: 2.5 -> "2ft").
+                items.append((f"beach_{bc['flag']}", f"{int(bc['swell_ft'] + 0.5)}ft"))
+
+        # Sea (ocean) temp — after the beach flag, same coastal context. Colour
+        # shifts to blue-grey when the reading is from a fallback station. Kept
+        # gated on tides being available (the original coastal grouping).
+        if tides:
+            try:
+                from utilities.tides import get_water_temp, is_water_temp_fallback
+                wt = get_water_temp()
+                if wt:
+                    wtype = "water_fb" if is_water_temp_fallback() else "water"
+                    # Number only; the SEA_ICON is drawn to its left in date().
+                    items.append((wtype, f"{wt}\xb0"))
+            except Exception:
+                pass
+
+        # Pool temp (Home Assistant) — grouped with the sea temp / tides. Config
+        # read fresh (a config-page save reloads config) so the toggle takes
+        # effect without a restart.
+        try:
+            from config import POOL_TEMP_ENABLED
+        except ImportError:
+            POOL_TEMP_ENABLED = False
+        if POOL_TEMP_ENABLED:
+            try:
+                pt = get_pool_temp()
+            except Exception:
+                pt = None
+            if pt is not None:
+                # Number only; the POOL_ICON (ladder) is drawn to its left in date().
+                # A trailing indicator follows the temp: flame while actively heating,
+                # a down arrow while declining (heater off, or pump off), nothing while
+                # holding at setpoint (or when the heater state is unknown).
+                try:
+                    status = get_pool_status()
+                except Exception:
+                    status = None
+                pool_type = ("pool_heat" if status == "heating"
+                             else "pool_cool" if status == "declining"
+                             else "pool")
+                items.append((pool_type, f"{round(pt)}\xb0"))
+
+        return items
+
     def _slot_needs_clear(self, item_type, display_text):
         """Whether to clear the x36-63 slot before drawing. Clears on a text OR
-        item-type change (two icon types can share a display string) and on a
-        forced scene re-entry (_redraw_date)."""
+        item-type change — two icon types can share a display string (sea "70°"
+        == pool "70°"), so a text-only check would leave stale pixels of the old
+        icon — and on a forced scene re-entry (_redraw_date)."""
         if not self._last_display_text:
             return False
         if getattr(self, "_redraw_date", False):
             return True
         return (self._last_display_text != display_text
                 or self._last_item_type != item_type)
+
+    def _draw_slot_icon(self, icon, colour, x0=DATE_POSITION[0]):
+        """Draw a small icon at x0 (rows ICON_Y_TOP..+4) — water/tide icon at x36,
+        or the heater flame at FLAME_X."""
+        for r, row in enumerate(icon):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    self.canvas.SetPixel(x0 + c, ICON_Y_TOP + r,
+                                         colour.red, colour.green, colour.blue)
 
     @Animator.KeyFrame.add(frames.PER_SECOND * 1)
     def date(self, count):
@@ -188,27 +304,8 @@ class DateScene(object):
         now = datetime.now()
         current_date = now.strftime("%b %d")
 
-        # Build display items: date always, tides + water temp if available
-        tides = self._get_tides()
-        items = [("date", current_date)]
-        if tides:
-            if tides.get("high"):
-                # Time only; the TIDE_UP_ICON (rising arrow) is drawn to its left.
-                items.append(("high", f"{tides['high']}"))
-            if tides.get("low"):
-                # Time only; the TIDE_DOWN_ICON (falling arrow) is drawn to its left.
-                items.append(("low", f"{tides['low']}"))
-            # Water temp after tides (same coastal context)
-            # Color shifts to blue-grey when reading is from a fallback station
-            try:
-                from utilities.tides import get_water_temp, is_water_temp_fallback
-                wt = get_water_temp()
-                if wt:
-                    wtype = "water_fb" if is_water_temp_fallback() else "water"
-                    # Number only; the SEA_ICON is drawn to its left in date().
-                    items.append((wtype, f"{wt}\xb0"))
-            except Exception:
-                pass
+        # Build the rotating right-side items (date, tides, sea temp, pool temp)
+        items = self._build_rotation_items(current_date)
 
         # Pick current item based on cycle
         slot = (self._cycle_counter // _CYCLE_SECONDS) % len(items)
@@ -233,9 +330,10 @@ class DateScene(object):
         else:
             start_color, end_color = self.map_moon_phase_to_color(moon_phase_value)
 
-        # Clear the previous item. Sea items draw an icon at x36 plus the number
-        # shifted to ICON_NUMBER_X, so a black text-redraw at x36 would leave the
-        # icon and shifted number lit — clear the whole slot instead.
+        # Clear previous text if it changed
+        # Clear the previous item. Icon items (sea/pool) occupy the icon at x36
+        # plus the number shifted to ICON_NUMBER_X, so a black text-redraw at x36
+        # would leave the icon and the shifted number lit — clear the whole slot.
         needs_clear = self._slot_needs_clear(item_type, display_text)
         if needs_clear:
             if self._last_item_type in _ICON_TYPES:
@@ -248,15 +346,19 @@ class DateScene(object):
         self._last_date = current_date
         self._last_item_type = item_type
 
-        # Draw with appropriate colour. Icon items (sea temp, tide high/low) draw
-        # an icon at x36 and the number/time at the type's number-x; the date is a
-        # per-char gradient; anything else is plain text at x36.
+        # Draw with appropriate colour. Icon items (sea/pool temp, tide high/low)
+        # draw an icon at x36 and the number/time at the type's number-x; the date
+        # is a per-char gradient; anything else is plain text at x36.
         if item_type in _ICON_TYPES:
             icon, number_x = _ICON_TYPES[item_type]
             icon_colour = _ICON_COLOUR[item_type]
-            _draw_slot_icon(self.canvas, icon, icon_colour)
+            self._draw_slot_icon(icon, icon_colour)
             graphics.DrawText(self.canvas, DATE_FONT, number_x,
                               DATE_POSITION[1], icon_colour, display_text)
+            if item_type in _HEATING_TYPES:      # heater running: flame after the temp
+                self._draw_slot_icon(FLAME_ICON, POOL_HEAT_COLOUR, x0=FLAME_X)
+            elif item_type in _COOLING_TYPES:    # declining: down arrow after the temp
+                self._draw_slot_icon(POOL_COOL_ICON, POOL_COOL_COLOUR, x0=FLAME_X)
         elif item_type == "date":
             self.draw_gradient_text(display_text, DATE_POSITION[0], DATE_POSITION[1], start_color, end_color)
 

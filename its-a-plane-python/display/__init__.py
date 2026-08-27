@@ -269,8 +269,11 @@ class Display(
             import json, time, os
             tmp = f"{self._tracked_epoch_file}.tmp.{os.getpid()}"
             with open(tmp, "w") as f:
-                json.dump({"ts": time.time(), "width": max_width,
-                           "pos": self._tracked_scroll_pos}, f)
+                    # No "pos" field: unlike the main epoch, which can be written
+                # mid-scroll at ISS-pass end, this one is only ever written on
+                # a wrap, so the position is WIDTH by definition and the mirror
+                # has no use for it.
+                json.dump({"ts": time.time(), "width": max_width}, f)
             os.replace(tmp, self._tracked_epoch_file)
         except Exception:
             pass

@@ -103,11 +103,14 @@ def _apply():
     global MIN_ALTITUDE, JOURNEY_CODE_SELECTED, JOURNEY_BLANK_FILLER, SPEED_UNITS
     global EMAIL, MAX_FARTHEST, MAX_CLOSEST
     global NWS_ALERTS_ENABLED, ISS_ALERTS_ENABLED, BLOCKED_CALLSIGNS, STATS_LOG_DAYS
+    global AQI_ALERTS_ENABLED, AQI_THRESHOLD
     global ATC_ENABLED, ATC_MODE, ATC_STATION, ATC_VOLUME, ATC_OUTPUT
     global ATC_AUTO_RESUME, ATC_QUIET_HOURS, ATC_CUSTOM_FEEDS
     global HOURLY_CHIME_ENABLED, HOURLY_CHIME_VOLUME
     global HOURLY_CHIME_QUIET_START, HOURLY_CHIME_QUIET_END
-    global AQI_ALERTS_ENABLED, AQI_THRESHOLD
+    global HA_BASE_URL, HA_TOKEN, POOL_TEMP_ENABLED, POOL_TEMP_ENTITY
+    global POOL_HEATING_ENTITY, POOL_PUMP_ENTITY
+    global BEACH_REPORT_ENABLED, BEACH_REPORT_URL
 
     # --- API Keys ---
     FR24_API_KEY = _get("FR24_API_KEY")
@@ -175,6 +178,29 @@ def _apply():
     # The chip shows when AQI >= AQI_THRESHOLD (0 = always show; 50 = Moderate+).
     AQI_ALERTS_ENABLED = _bool(_get("AQI_ALERTS_ENABLED", "False"))
     AQI_THRESHOLD = _int("AQI_THRESHOLD", 50, 0, 500)
+
+    # --- Pool temperature (read from a Home Assistant sensor over REST) ---
+    # HA_BASE_URL + HA_TOKEN are entered in the web config page (token masked);
+    # empty defaults so no infra address or secret ever lives in committed code.
+    HA_BASE_URL = _get("HA_BASE_URL", "")
+    HA_TOKEN = _get("HA_TOKEN")
+    POOL_TEMP_ENABLED = _bool(_get("POOL_TEMP_ENABLED", "False"))
+    POOL_TEMP_ENTITY = _get("POOL_TEMP_ENTITY", "sensor.heat_pump_water_temperature")
+    # Optional: a climate/switch/binary_sensor entity whose heating state lights a
+    # flame next to the pool temp. Empty = off. (climate entities expose hvac_action.)
+    POOL_HEATING_ENTITY = _get("POOL_HEATING_ENTITY", "")
+    # Optional circulation/flow entity (e.g. binary_sensor.heat_pump_flow). Two roles:
+    # (1) the pool temp only refreshes while it's 'on' — the temp sensor sits at the
+    # heater and reads stagnant water when flow is off; (2) 2nd gate for the flame,
+    # must ALSO be 'on'. Empty = temp always refreshes + flame uses the heater alone.
+    POOL_PUMP_ENTITY = _get("POOL_PUMP_ENTITY", "")
+
+    # --- Beach flag + surf (East Hampton Town lifeguard "Beach Report") ---
+    # A green/yellow/red flag pennant + swell height in the date rotation. Reads the
+    # Town's beach-report JSON API (/api/surf-data). Off by default; the endpoint is
+    # overridable so the host isn't hard-coded (empty => the built-in EH URL).
+    BEACH_REPORT_ENABLED = _bool(_get("BEACH_REPORT_ENABLED", "False"))
+    BEACH_REPORT_URL = _get("BEACH_REPORT_URL", "")
 
     # --- Blocked callsigns (comma-separated, e.g. "N12345,N67890") ---
     _raw_blocked = _get("BLOCKED_CALLSIGNS", "")

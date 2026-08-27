@@ -636,9 +636,27 @@
             } catch (e) { return; }
 
             const map = L.map('route-map', { zoomControl: true }).setView([40, -40], 3);
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-                maxZoom: 18,
+            // Esri Canvas Dark Gray. CARTO's free tier started watermarking
+            // unauthenticated tiles with a "get an API key" overlay; it still
+            // SERVES them (HTTP 200, valid PNG), so nothing broke loudly — the
+            // watermark just appeared on the map one day.
+            //
+            // Two things differ from a straight swap:
+            //   * ArcGIS REST tile paths are {z}/{y}/{x} — y BEFORE x. Using the
+            //     usual {z}/{x}/{y} silently returns the wrong tile, not a 404.
+            //   * This basemap stops at zoom 16, not 18. Leaving maxZoom at 18
+            //     would give blank tiles on the last two zoom levels.
+            //
+            // Attribution is kept: Esri's terms require it, and Leaflet's
+            // default control is the only place it appears.
+            const esriAttr = 'Tiles &copy; <a href="https://www.esri.com/">Esri</a>';
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+                attribution: esriAttr,
+                maxZoom: 16,
+            }).addTo(map);
+            // Labels ride on a separate transparent layer above the base.
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 16,
             }).addTo(map);
 
             // C4: touch detection widens hit zones and swaps hover-tooltips for tap-popups.

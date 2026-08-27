@@ -119,6 +119,8 @@ class TrackedRouteScene(object):
                 chars.append((ch, colours.LIGHT_PURPLE))
             else:
                 chars.append((ch, NUMERIC_COLOUR if ch.isnumeric() else colours.LIGHT_PURPLE))
+        # Individual characters, not " \u2192 " as one segment: the kern is a
+        # per-glyph correction and a multi-character segment used to get none.
         chars.append((" ", ARROW_COLOUR))
         for ch in origin:
             chars.append((ch, origin_colour))
@@ -145,7 +147,10 @@ class TrackedRouteScene(object):
                 text_start + total_len, LINE1_Y,
                 colour, ch,
             )
-            total_len += w
+            # Same kerning as the stats line below (setup/fonts.kern) — the two
+            # sit on one screen and a different word rhythm on each reads as a
+            # mistake.
+            total_len += w + sum(fonts.kern_5x8(c) for c in ch)
 
         # Total scrollable width = logo + gap + text. Advancing and wrapping
         # are the shared driver's job now; this scene only reports its width.

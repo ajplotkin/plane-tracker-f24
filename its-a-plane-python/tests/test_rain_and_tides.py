@@ -210,7 +210,7 @@ def test_rain_unconfigured_makes_no_call():
 
 # ══ tides.py ════════════════════════════════════════════════════════════════
 
-def _reset_tides(station="9999999", water="9999999", fallback="", fb_enabled=True):
+def _reset_tides(station="8510560", water="8510560", fallback="", fb_enabled=True):
     tides._cached_tides = None
     tides._cached_date = None
     tides._tide_next_retry = 0.0
@@ -247,7 +247,7 @@ def test_tide_predictions_dispatch_then_format_next_high_and_low():
         assert tides.get_next_tides() == {"high": _expect_12hr(high),
                                           "low": _expect_12hr(low)}
         g.assert_called_once()                     # once per day, not per frame
-        assert g.call_args.kwargs["params"]["station"] == "9999999"
+        assert g.call_args.kwargs["params"]["station"] == "8510560"
 
 
 def test_tide_getter_never_blocks_and_retry_is_gated_to_5min():

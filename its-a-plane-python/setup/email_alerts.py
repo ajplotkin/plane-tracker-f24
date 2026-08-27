@@ -24,7 +24,7 @@ def _send(subject: str, body: str, attachment_path: Optional[str] = None):
     if not EMAIL.strip():
         return
 
-    sender = os.environ.get("EMAIL_SENDER", "")
+    sender = os.environ.get("EMAIL_SENDER", "flight.tracker.alerts2025@gmail.com")
     password = os.environ.get("EMAIL_PASSWORD", "")
     receiver = EMAIL
 

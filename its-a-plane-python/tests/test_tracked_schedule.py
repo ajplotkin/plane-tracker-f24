@@ -601,8 +601,8 @@ class TestRendering:
         assert "18:30" in on_time or "6:30p" in on_time
         assert "20:15" in delayed or "8:15p" in delayed
         assert "18:30" not in delayed and "6:30p" not in delayed
-        assert "(+1:45)" in delayed
-        assert "(+" not in on_time
+        assert "+1:45" in delayed
+        assert "+" not in on_time
         # The route must NOT appear here: scenes/trackedroute.py already draws
         # it on line 1 of the same screen. (journey.py does not — it bails when
         # len(self._data) == 0, which is the tracked page's own condition.)
@@ -614,7 +614,7 @@ class TestRendering:
         from scenes.trackedstats import _build_stats
         line = _text(_build_stats(dict(
             self.BASE, dep_delay_min=40, dep_time_revised="2026-05-11 19:10")))
-        assert "(+40m)" in line
+        assert "+40m" in line
 
     def test_delay_colour_bands(self):
         from scenes.trackedstats import _build_stats, TIME_DIST_COLOUR
@@ -634,8 +634,8 @@ class TestRendering:
                 self.BASE, dep_delay_min=mins,
                 dep_time_revised="2026-05-11 20:15"))
             # "Departs " is always the base colour; the TIME carries the band.
-            assert _colour_of(parts, "Departs") == TIME_DIST_COLOUR
-            time_colour = parts[len("Departs ")][1]
+            assert _colour_of(parts, "Dep") == TIME_DIST_COLOUR
+            time_colour = parts[len("Dep ")][1]
             assert time_colour == expected, f"{mins} min -> wrong colour"
 
     def test_sub_threshold_delay_shows_the_scheduled_time(self):
@@ -643,12 +643,12 @@ class TestRendering:
         from scenes.trackedstats import _build_stats
         line = _text(_build_stats(dict(
             self.BASE, dep_delay_min=10, dep_time_revised="2026-05-11 18:40")))
-        assert "(+" not in line
+        assert "+" not in line
         assert "18:30" in line or "6:30p" in line
 
-    def test_unknown_delay_renders_exactly_as_before(self):
-        """dep_delay_min None (AirLabs said nothing) must be byte-identical to
-        the pre-feature output."""
+    def test_unknown_delay_adds_nothing(self):
+        """dep_delay_min None (AirLabs said nothing) must render identically to
+        the fields being absent — no chip, no revision, no adornment."""
         from scenes.trackedstats import _build_stats
         before = _build_stats(dict(self.BASE))
         with_nulls = _build_stats(dict(
@@ -657,12 +657,18 @@ class TestRendering:
         # Pin the WHOLE line, in whichever clock format is configured. The old
         # form was `== "..." or "Departs" in _text(before)`, whose right-hand
         # side is true of almost any output, so it passed regardless.
-        assert _text(before) in ("Departs 18:30", "Departs 6:30p"), _text(before)
+        #
+        # BASE carries no dep_time_ts and no arr_time, so this is the minimal
+        # shape: the ticketed time and nothing else. No timestamp means no local
+        # conversion is possible, and the line must degrade to the bare time
+        # rather than guessing a zone or blanking. No airport code either —
+        # line 1 already shows the route.
+        assert _text(before) in ("Dep 18:30", "Dep 6:30p"), _text(before)
 
     def test_known_on_time_is_not_treated_as_delayed(self):
         from scenes.trackedstats import _build_stats
         line = _text(_build_stats(dict(self.BASE, dep_delay_min=0)))
-        assert "(+" not in line
+        assert "+" not in line
         assert "18:30" in line or "6:30p" in line
 
     def test_delay_without_a_revised_time_keeps_the_scheduled_time(self):
@@ -676,3 +682,35 @@ class TestRendering:
         line = _text(_build_stats(
             {"is_scheduled": True, "origin": "EWR", "destination": "LAX"}))
         assert line == "Scheduled EWR→LAX"
+
+
+class TestKerning:
+    """5x8 is fixed-width, but its glyphs carry side bearings: a word space
+    opens a 7px hole against a 1-2px letter rhythm, and "+" inks all five
+    columns so "+44" renders as one unbroken bar."""
+
+    def test_space_is_tightened_and_plus_is_separated(self):
+        from setup.fonts import kern_5x8
+        assert kern_5x8(" ") == -2
+        assert kern_5x8("+") == 1
+
+    def test_ordinary_glyphs_are_untouched(self):
+        from setup.fonts import kern_5x8
+        for ch in "Dep4:2mAEDT()":
+            assert kern_5x8(ch) == 0, ch
+
+    def test_the_tracked_line_actually_gets_narrower(self):
+        """Pins the effect, not just the table: a mutation returning 0 for every
+        character leaves the width unchanged and every other test still passes."""
+        from setup.fonts import kern_5x8
+        from scenes.trackedstats import _build_stats
+        line = _text(_build_stats({
+            "is_scheduled": True, "origin": "SEA", "destination": "EWR",
+            "dep_time": "2026-08-20 22:58", "dep_time_ts": 1787291880,
+            "dep_time_revised": "2026-08-20 23:42",
+            "dep_time_revised_ts": 1787294520, "dep_delay_min": 44,
+        }))
+        raw = len(line) * 5
+        kerned = raw + sum(kern_5x8(c) for c in line)
+        assert kerned < raw, "kerning had no effect on a real rendered line"
+        assert " " in line and "+" in line, f"fixture no longer exercises it: {line!r}"
