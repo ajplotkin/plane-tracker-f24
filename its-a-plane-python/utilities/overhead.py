@@ -160,7 +160,49 @@ IATA_TO_ICAO = {
     # Regional operators (for cs_airline_iata → ICAO prefix in route-based search)
     "YX": "RPA", "MQ": "ENY", "OH": "JIA", "PT": "PDT", "OO": "SKW",
     "9E": "EDV", "G7": "GJS", "QX": "QXE",
+    # European mainlines and the wet-lease/regional operators that fly for them.
+    # This map was US-centric: tracking LX561 NCE-ZRH failed partly because
+    # neither LX (Swiss) nor its operator 2L (Helvetic) was here at all.
+    "LX": "SWR", "OS": "AUA", "SN": "BEL", "LO": "LOT", "TP": "TAP",
+    "A3": "AEE", "VY": "VLG", "FR": "RYR", "U2": "EZY", "W6": "WZZ",
+    "TK": "THY", "EW": "EWG", "DE": "CFG",
+    "2L": "OAW",   # Helvetic Airways — wet-leases for Swiss
+    "BT": "BTI",   # airBaltic — also provides ACMI capacity to Swiss/Lufthansa
+    "WX": "BCY",   # CityJet
+    "EN": "DLA",   # Air Dolomiti
 }
+
+def callsign_prefixes(sched):
+    """Callsign prefixes to look for on a route, most specific first.
+
+    A tracked flight can appear on the wire under any of three identities:
+
+      1. the OPERATING carrier's ICAO   — US regionals (AA4370 flies as JIA4370)
+      2. the OPERATING carrier's IATA   — always emitted, not just when the
+         ICAO is unknown: some feeds carry the IATA form, and a 2-letter prefix
+         is a weak match (Air Dolomiti "EN" also matches Enter Air "ENT123"),
+         which is why it sits BELOW the ICAO and above nothing else
+      3. the MARKETING carrier's ICAO   — European wet-leases
+
+    (3) is the one that was missing. LX561 NCE-ZRH is marketed by Swiss
+    (LX/SWR), operated by Helvetic (2L/OAW), and flies as SWR1PX — the
+    marketing carrier's prefix, with a callsign carrying no flight number at
+    all. Filtering only by the operator looked for OAW while the aircraft
+    squawked SWR, so the route search could never match it.
+
+    Order matters: the operator comes first so US regionals, which really do
+    fly under their own callsign, still resolve exactly as before.
+    """
+    if not sched:
+        return []
+    out = []
+    for p in (IATA_TO_ICAO.get(sched.get("cs_airline_iata", ""), ""),
+              sched.get("cs_airline_iata", ""),
+              sched.get("airline_icao", "")):
+        if p and p not in out:
+            out.append(p)
+    return out
+
 
 # Mainline → regional operator ICAO prefixes
 # Regional carriers fly under mainline flight numbers but use their own ICAO callsigns
@@ -1904,17 +1946,99 @@ class Overhead:
                     origin = _clean_code(sched.get("origin", ""))
                     dest = _clean_code(sched.get("destination", ""))
                     cs_airline = sched.get("cs_airline_iata", "")  # e.g., YX (Republic)
-                    # Convert operating carrier IATA to ICAO prefix for callsign matching
-                    cs_icao = IATA_TO_ICAO.get(cs_airline, "")
-                    if origin and dest and (cs_icao or cs_airline):
+                    # Prefix candidates, tried in order. The third one matters for
+                    # Europe and was missing:
+                    #
+                    #   LX561 NCE-ZRH is marketed by Swiss (LX/SWR) and OPERATED by
+                    #   Helvetic (2L/OAW) — but it flies on the wire as SWR1PX, the
+                    #   MARKETING carrier's ICAO with a callsign that contains no
+                    #   flight number at all. European carriers routinely fly
+                    #   alphanumeric callsigns decoupled from the ticketed number to
+                    #   keep similar-sounding callsigns off one frequency; AirLabs
+                    #   has no record of SWR1PX, and its flight_icao says SWR561,
+                    #   which never existed on the wire.
+                    #
+                    # Filtering only by the OPERATING carrier could never match
+                    # that: it looked for 2L/OAW while the aircraft was squawking
+                    # SWR. Searching the route and keeping anything with the
+                    # marketing carrier's prefix finds it whatever the number is.
+                    prefixes = callsign_prefixes(sched)
+
+                    # Only AFTER the aircraft should have left. Before that, no
+                    # aircraft on this route can be this flight, and a route
+                    # search will happily return a different one.
+                    #
+                    # This gate matters more since prefixes gained the marketing
+                    # carrier. The old condition was `cs_icao or cs_airline`,
+                    # which was falsy for a plain mainline flight and so kept the
+                    # route search off entirely for those. callsign_prefixes()
+                    # returns [airline_icao] for ANY flight with a schedule, so
+                    # without this the search would run for every tracked flight
+                    # and, pre-departure, lock onto whatever same-airline
+                    # aircraft happened to be flying the route — then Strategy 2
+                    # would keep re-using that wrong callsign, and when it landed
+                    # the miss counter would auto-wipe the flight the user
+                    # actually asked for, before it had even taken off.
+                    _dep_ts = tracked_schedule.effective_departure_ts(
+                        sched, sched.get("dep_delay_min"))
+                    _airborne_window = _dep_ts is None or time() >= _dep_ts
+
+                    if origin and dest and prefixes and _airborne_window:
                         route_flights = self._api.find_by_route(origin, dest)
                         if route_flights:
-                            # Filter to operating carrier prefix
-                            prefix = cs_icao or cs_airline
-                            candidates = [
-                                f for f in route_flights
-                                if (f.callsign or "").upper().startswith(prefix)
-                            ]
+                            # First prefix that matches anything wins, so the
+                            # operating carrier still takes precedence where it
+                            # does fly under its own callsign (US regionals).
+                            # A callsign of prefix + pure digits whose digits are
+                            # NOT this flight's number is provably a different
+                            # flight (SWR40 is not LX561). Only alphanumeric
+                            # callsigns like SWR1PX can be the decoupled one, so
+                            # those stay. Without this the nearest-home tie-break
+                            # below could pick a same-airline aircraft that we
+                            # already know is the wrong flight — LHR-JFK routinely
+                            # has three BAW airborne at once.
+                            _num = "".join(c for c in flight_input if c.isdigit())
+
+                            # Taken from the schedule, not from the position in
+                            # the list: for a flight with no codeshare there is
+                            # only ONE prefix and it IS the marketing carrier, so
+                            # a positional rule (last-of-many) left exactly that
+                            # case unguarded — the plain mainline flight that
+                            # matched any sibling on the route.
+                            _marketing = sched.get("airline_icao", "")
+
+                            def _plausible(cs, prefix):
+                                tail = cs[len(prefix):]
+                                # A 2-char prefix is an IATA code and matches far
+                                # too loosely against ICAO callsigns: Air Dolomiti
+                                # "EN" also prefixes Enter Air's "ENT123". Require
+                                # a digit straight after it — a flight number
+                                # always has one, another airline's ICAO does not.
+                                if len(prefix) == 2 and not tail[:1].isdigit():
+                                    return False
+                                # Under the MARKETING prefix, prefix + digits that
+                                # are not this flight's number is provably another
+                                # flight of the same airline (SWR40 is not LX561),
+                                # and LHR-JFK routinely has three BAW up at once.
+                                #
+                                # Not applied to the OPERATING prefix: a wet-lease
+                                # operator flying the same flight under its OWN
+                                # number (OAW77 for LX561) is the original reason
+                                # this route search exists, and rejecting it would
+                                # undo that.
+                                if prefix == _marketing and tail.isdigit() and _num:
+                                    return tail == _num
+                                return True
+
+                            candidates = []
+                            for prefix in prefixes:
+                                candidates = [
+                                    f for f in route_flights
+                                    if (f.callsign or "").upper().startswith(prefix)
+                                    and _plausible((f.callsign or "").upper(), prefix)
+                                ]
+                                if candidates:
+                                    break
                             if not candidates:
                                 # Fallback: try all known regional prefixes
                                 icao_pfx = flight_input.rstrip("0123456789")
@@ -1941,7 +2065,16 @@ class Overhead:
                                     pass
                                 match = candidates[0]
                             if match:
-                                self._tracked_alt_callsign = (match.callsign or "").upper()
+                                _cs = (match.callsign or "").upper()
+                                # Only cache the alt callsign when it came from an
+                                # OPERATING-carrier prefix. A marketing-prefix hit
+                                # is a best guess; caching it makes Strategy 2
+                                # re-use it on every later poll and prevents
+                                # Strategy 3 from ever finding the real operating
+                                # callsign once that aircraft is airborne.
+                                _op_prefixes = prefixes[:-1] if len(prefixes) > 1 else prefixes
+                                if any(_cs.startswith(p) for p in _op_prefixes):
+                                    self._tracked_alt_callsign = _cs
                                 logger.info(
                                     f"Found tracked flight via route search "
                                     f"{origin}→{dest}: {match.callsign}"
