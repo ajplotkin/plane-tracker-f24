@@ -88,7 +88,7 @@ def get_airline_name(icao):
 
 def refresh():
     """Force re-download of airline database."""
-    global _db, _loaded
+    global _loaded
     _loaded = False
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)

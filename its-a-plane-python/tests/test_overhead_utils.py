@@ -14,14 +14,11 @@ Tests cover:
 
 import sys
 import os
-import json
 import time
-import math
 import threading
 import tempfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 
 # Ensure the project root is on sys.path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -443,7 +440,7 @@ class TestLogFarthestFlight:
 
     def test_skips_when_both_distances_negative(self):
         """Returns immediately when both origin and dest distances are negative."""
-        from utilities.overhead import log_farthest_flight, safe_load_json
+        from utilities.overhead import log_farthest_flight
         entry = self._make_entry(distance_origin=-1, distance_destination=-1)
         with patch("utilities.overhead.safe_load_json") as mock_load:
             log_farthest_flight(entry)

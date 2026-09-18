@@ -227,7 +227,7 @@ def refresh():
     directory (see _background_refresh), so it degrades to a normal _load()
     instead of raising.
     """
-    global _db, _loaded
+    global _loaded
     _loaded = False
     try:
         if os.path.exists(CACHE_FILE):

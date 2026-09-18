@@ -92,7 +92,7 @@ class ClockScene(object):
                 self.today_sunrise = sr
                 self.today_sunset = ss
                 self.last_fetch_date = datetime.now().date()
-                logging.info(f"Clock: loaded cached sunrise/sunset from disk")
+                logging.info("Clock: loaded cached sunrise/sunset from disk")
         except Exception:
             pass  # First boot or corrupt cache — will fetch from API
 

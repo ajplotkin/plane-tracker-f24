@@ -29,7 +29,7 @@ import logging
 import os
 import ssl
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from utilities.cache import FR24Cache
 
@@ -171,7 +171,6 @@ class LiveFlight:
             return
 
         schedule = details.get("schedule_info", {})
-        flight_progress = details.get("flight_progress", {})
         flight_info = details.get("flight_info", {})
 
         self.number = schedule.get("flight_number", "") or self.callsign

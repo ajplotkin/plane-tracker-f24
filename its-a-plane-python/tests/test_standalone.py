@@ -299,7 +299,7 @@ def test_thread_safety_data_structures():
     for t in threads:
         t.join()
 
-    check(f"No concurrent access errors (0 errors)", len(errors) == 0)
+    check(f"No concurrent access errors ({len(errors)} errors)", len(errors) == 0)
 
 
 def test_error_handler_logic():

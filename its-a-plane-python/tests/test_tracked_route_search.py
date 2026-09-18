@@ -22,7 +22,6 @@ nothing caught. Both have a test here:
 import os
 import tempfile
 
-import pytest
 
 os.environ.setdefault("PLANE_TRACKER_DATA_DIR", tempfile.mkdtemp())
 

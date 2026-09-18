@@ -13,7 +13,6 @@ import tempfile
 import threading
 import json
 
-import pytest
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -74,7 +73,6 @@ class TestAdsbdb:
 
     def test_lru_updates_last_access(self):
         from utilities import adsbdb
-        import time as _time
         with adsbdb._cache_lock:
             adsbdb._cache.clear()
             old_ts = adsbdb.time() - 10

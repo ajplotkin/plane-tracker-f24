@@ -1287,7 +1287,10 @@ class ATCAudioManager:
         self._cast_stop = stop_evt
 
         def _run():
-            import pychromecast
+            # Re-imported rather than closed over: this runs on its own thread,
+            # and the outer import is only an availability probe. pyflakes calls
+            # it a redefinition; it is deliberate.
+            import pychromecast  # noqa: F811
             import uuid as _uuid_mod
             dev, browser = None, None
             try:

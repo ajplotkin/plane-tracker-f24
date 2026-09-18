@@ -1,12 +1,10 @@
 """Tests for FL altitude formatting and nearest city lookup."""
 
 import json
-import math
 import os
 import sys
 import tempfile
 import types
-import pytest
 from unittest.mock import patch, MagicMock
 
 # Ensure project root is importable

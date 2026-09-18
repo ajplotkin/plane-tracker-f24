@@ -467,6 +467,9 @@ class TestNoAPIHammering:
         # would block; cache check comes before rate limit)
         r2 = mock_get_flights(bounds=bounds1)
         assert api_call_count == 1  # Still 1
+        # Captured but never compared before: a cache that skipped the API and
+        # returned something else would have passed the count assertion alone.
+        assert r2 == r1
 
     def test_fr24_cache_hit_avoids_api_completely(self):
         """

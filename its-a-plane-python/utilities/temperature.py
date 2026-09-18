@@ -102,7 +102,7 @@ _rate_lock = threading.Lock()
 
 def _rate_limited(endpoint: str = "temp") -> bool:
     """Return True if we should skip this API call due to rate limiting."""
-    global _in_backoff, _backoff_entered_ts
+    global _in_backoff
     with _rate_lock:
         # Auto-clear backoff after 2 hours
         if _in_backoff and (time.time() - _backoff_entered_ts) > _BACKOFF_AUTO_CLEAR_S:
