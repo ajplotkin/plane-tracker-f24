@@ -49,12 +49,17 @@
             color: #ffb000;
         }
         #current-tracked { color: #806000; font-size: 14px; margin-bottom: 12px; }
-        .track-row { display: flex; gap: 8px; align-items: center; }
+        /* Wraps rather than squeezing: at 375px a third button used to shove
+           the input down to a few characters and break "Queue next" across two
+           lines, making that button taller than the row. */
+        .track-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
         .track-row input {
             font-family: 'Share Tech Mono', 'Courier New', monospace;
             font-size: 16px;
             padding: 6px 10px;
             width: 160px;
+            flex: 1 1 160px;
+            min-width: 0;          /* flex items refuse to shrink below content without this */
             text-transform: uppercase;
             background: #0a0a0a;
             border: 1px solid #444;
@@ -71,6 +76,7 @@
             color: #000;
             font-weight: bold;
         }
+        .track-row button { white-space: nowrap; }   /* never break a label mid-word */
         .track-row button:hover { background: #ffc030; }
         .track-row button.clear {
             background: #1a1a1a;
@@ -80,6 +86,18 @@
         .track-row button:disabled {
             opacity: 0.4;
             cursor: wait;
+        }
+        /* Four characters max, so these stay small and sit side by side — but
+           wide enough that the placeholder is not cut off mid-word. */
+        .track-row input.iata { flex: 0 1 8.5em; width: auto; min-width: 5.5em; }
+
+        @media (max-width: 480px) {
+            /* Give the callsign its own line and let the buttons share the next
+               one, instead of three buttons fighting one input for 375px. */
+            .track-row > input:not(.iata) { flex: 1 0 100%; }
+            .track-row button { flex: 1 1 auto; padding: 8px 10px; }
+            .track-box { padding: 12px; }
+            body { padding: 12px; }
         }
         #track-status {
             margin-top: 12px;
@@ -145,8 +163,12 @@
         #queue-list .queue-pos { color: #888; min-width: 18px; }
         #queue-list .queue-rm {
             margin-left: auto; cursor: pointer; border: 0; background: none;
-            color: #a00; font-size: 16px; line-height: 1; padding: 0 4px;
+            color: #a00; font-size: 18px; line-height: 1;
+            /* 32px of tappable area — the glyph alone is a ~10px target, which
+               is below every touch guideline and easy to miss on a phone. */
+            min-width: 32px; min-height: 32px; padding: 0 6px;
         }
+        #queue-list .queue-rm:hover { color: #f33; }
         #leg-picker { margin-top: 10px; display: none; }
         #leg-picker .leg-btn {
             display: block; width: 100%; text-align: left;
@@ -202,9 +224,9 @@
     <div class="track-box">
         <h2>Route Search</h2>
         <div class="track-row">
-            <input type="text" id="origin-input" placeholder="Origin (EWR)" maxlength="4" style="width:90px;" />
+            <input type="text" id="origin-input" class="iata" placeholder="Origin (EWR)" maxlength="4" />
             <span style="font-size:18px;">→</span>
-            <input type="text" id="dest-input" placeholder="Dest (LAX)" maxlength="4" style="width:90px;" />
+            <input type="text" id="dest-input" class="iata" placeholder="Dest (LAX)" maxlength="4" />
             <button id="btn-route" onclick="searchRoute()">Search</button>
         </div>
         <div id="route-results" style="margin-top:12px; font-size:14px;"></div>
