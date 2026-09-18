@@ -1,13 +1,11 @@
 """Tests for AirLabs schedule lookup and pre-departure tracked flight handling."""
 
-import json
 import os
 import sys
 import types
 from time import time
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -191,3 +189,71 @@ class TestFormatDepTime:
 
     def test_none(self):
         assert self._format_12hr(None) == ""
+
+
+class TestGetFlightLegsWindow:
+    """Which legs survive the filter.
+
+    The original rule was `dep_time_ts > now - 3600`: a leg vanished 60 minutes
+    after pushback. A transcon three hours from its destination therefore
+    dropped out of the picker while very much in the air — and reading that
+    absence as "it landed" is exactly the wrong conclusion to hand a user.
+    Ordered so a naive implementation fails: the long-airborne leg is FIRST,
+    so "return everything" and "return the tail" both look right otherwise.
+    """
+
+    def _legs(self, schedules):
+        import utilities.airlabs as mod
+        resp = MagicMock()
+        resp.json.return_value = {"response": schedules}
+        resp.raise_for_status = MagicMock()
+        with patch.object(mod, "AIRLABS_API_KEY", "test-key"):
+            with patch("utilities.airlabs.requests.get", return_value=resp):
+                return mod.get_flight_legs("UA1714")
+
+    def _leg(self, dep_off, arr_off, org, dst, **over):
+        now = time()
+        d = {"dep_iata": org, "arr_iata": dst, "flight_iata": "UA1714",
+             "dep_time_ts": now + dep_off, "arr_time_ts": now + arr_off,
+             "status": "en-route"}
+        d.update(over)
+        return d
+
+    def test_a_leg_airborne_three_hours_is_kept(self):
+        legs = self._legs([
+            self._leg(-2 * 3600, +3600, "LGA", "DEN"),   # departed 2h ago, lands in 1h
+            self._leg(+4 * 3600, +6 * 3600, "DEN", "GJT"),
+        ])
+        routes = [(l["origin"], l["destination"]) for l in legs]
+        assert ("LGA", "DEN") in routes, (
+            "a leg still an hour from its destination was dropped — the "
+            "departure-based window is back")
+        assert ("DEN", "GJT") in routes
+
+    def test_a_leg_that_has_arrived_is_dropped(self):
+        legs = self._legs([
+            self._leg(-6 * 3600, -2 * 3600, "SFO", "LGA"),   # landed 2h ago
+            self._leg(+4 * 3600, +6 * 3600, "DEN", "GJT"),
+        ])
+        routes = [(l["origin"], l["destination"]) for l in legs]
+        assert ("SFO", "LGA") not in routes, "a leg that already landed was offered"
+        assert ("DEN", "GJT") in routes
+
+    def test_without_an_arrival_time_it_falls_back_to_the_departure_window(self):
+        """AirLabs does not always send arr_time_ts; the old rule is the
+        fallback, not the primary."""
+        legs = self._legs([
+            self._leg(-30 * 60, 0, "LGA", "DEN", arr_time_ts=None),   # left 30m ago
+            self._leg(-5 * 3600, 0, "SFO", "LGA", arr_time_ts=None),  # left 5h ago
+        ])
+        routes = [(l["origin"], l["destination"]) for l in legs]
+        assert ("LGA", "DEN") in routes
+        assert ("SFO", "LGA") not in routes
+
+    def test_each_leg_carries_what_the_picker_needs_to_name_its_airline(self):
+        """_build_cached_route looks the carrier name up from airline_icao;
+        without it every picked leg showed a blank airline."""
+        legs = self._legs([self._leg(+3600, +3 * 3600, "DEN", "GJT",
+                                     airline_icao="SKW", airline_iata="OO")])
+        assert legs[0]["airline_icao"] == "SKW"
+        assert legs[0]["arr_time_ts"] is not None

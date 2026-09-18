@@ -162,7 +162,9 @@ IATA_TO_ICAO = {
     "9E": "EDV", "G7": "GJS", "QX": "QXE",
     # European mainlines and the wet-lease/regional operators that fly for them.
     # This map was US-centric: tracking LX561 NCE-ZRH failed partly because
-    # neither LX (Swiss) nor its operator 2L (Helvetic) was here at all.
+    # neither LX (Swiss) nor any of the carriers reported operating for it was
+    # here at all. The operator entries below are the ones seen on the route,
+    # not a claim that any particular one flies it.
     "LX": "SWR", "OS": "AUA", "SN": "BEL", "LO": "LOT", "TP": "TAP",
     "A3": "AEE", "VY": "VLG", "FR": "RYR", "U2": "EZY", "W6": "WZZ",
     "TK": "THY", "EW": "EWG", "DE": "CFG",
@@ -185,15 +187,17 @@ def callsign_prefixes(sched):
       3. the MARKETING carrier's ICAO   — European wet-leases
 
     (3) is the one that was missing. LX561 NCE-ZRH is marketed by Swiss
-    (LX/SWR) and flies as SWR1PX — the marketing carrier's prefix, with a
-    callsign carrying no flight number at all.
+    (LX/SWR), and on the day it was reported it flew as SWR1PX — the marketing
+    carrier's prefix, with a callsign carrying no flight number at all. One
+    observation, so read it as "this happens", not as LX561's fixed callsign.
 
-    The OPERATOR is not fixed. AirLabs reported 2L (Helvetic) for the date
-    looked up here; c0wsaysmoo observed airBaltic metal (BT/BTI) on the route.
-    Wet-lease capacity rotates, so filtering on the operator's prefix looks for
-    OAW or BTI while the aircraft squawks SWR, and the route search could never
-    match it. That is the argument for (3), and it does not depend on which
-    operator happens to be reported.
+    The reported OPERATOR is not stable either: AirLabs said 2L (Helvetic) for
+    the date looked up here, and c0wsaysmoo saw airBaltic metal (BT/BTI). Two
+    reports that disagree; the likeliest reading is rotating wet-lease
+    capacity, but one of them simply being wrong fits equally. Either way the
+    operator prefix is not something to filter on — it looks for OAW or BTI
+    while the aircraft squawks SWR, and the route search could never match.
+    That is the argument for (3), and it survives whichever reading is true.
 
     Order matters: the operator comes first so US regionals, which really do
     fly under their own callsign, still resolve exactly as before.
@@ -871,8 +875,9 @@ class Overhead:
         self._MAX_TRACKED_HOURS = 36         # hard staleness cap for tracked flights
         self._tracked_last_callsign = ""     # last callsign we polled for
         # (callsign, scheduled_departure). The callsign ALONE cannot identify
-        # a tracked flight: one number can cover several legs in a day
-        # (UA1714 is LGA-DEN and then DEN-GJT), they share a callsign, and the
+        # a tracked flight: one number can cover several legs in a day (UA1714
+        # was LGA-DEN then DEN-GJT on the day this was reported), they share a
+        # callsign, and the
         # leg is carried by scheduled_departure. Keying the reset on callsign
         # meant switching legs reset NOTHING — _tracked_was_live stayed True
         # from the leg already airborne, which bypasses the departure guard
@@ -1373,6 +1378,36 @@ class Overhead:
                         update_position_only=pos_only,
                     )
 
+                # The callsign match is callsign-ONLY (_grab_tracked applies no
+                # route or departure filter), and both legs of a connection
+                # share one callsign: UA1714 is UAL1714 inbound LGA-DEN AND
+                # outbound DEN-GJT. So while we are waiting for our leg, the
+                # aircraft flying TO our origin is the inbound that will become
+                # it -- not it. Going live on the inbound stores its position
+                # and its ETA, and when it lands the miss counter runs out and
+                # auto-wipes the leg the user picked, mid-turnaround.
+                #
+                # Narrow on purpose: only when the live match is flying to our
+                # own origin, which no other situation produces, and only until
+                # our leg has genuinely been live once (after that a differing
+                # destination is a diversion, which we do want to follow).
+                # Marking the route implausible is not enough -- that only
+                # chooses which route dict to cache, while was_live, the miss
+                # counter and last_data are all set from the wrong aircraft.
+                if (tracked_data and tracked_data.get("is_live")
+                        and not self._tracked_was_live and cached_route):
+                    _our_org = _clean_code(cached_route.get("origin", ""))
+                    _our_dst = _clean_code(cached_route.get("destination", ""))
+                    _live_dst = _clean_code(tracked_data.get("destination", ""))
+                    if _our_org and _live_dst and _our_org != _our_dst \
+                            and _live_dst == _our_org:
+                        logger.info(
+                            f"Tracked {tracked_callsign}: live match is flying to "
+                            f"{_live_dst}, which is OUR origin — this is the inbound "
+                            f"leg, not {_our_org}→{_our_dst}. Waiting."
+                        )
+                        tracked_data = None
+
                 if tracked_data and tracked_data.get("is_live"):
                     just_became_live = not self._tracked_was_live
                     self._tracked_was_live = True
@@ -1574,6 +1609,18 @@ class Overhead:
                                 if pin_dep_ts is None:
                                     pin_dep_ts = self._persist_self_pin(
                                         tracked_callsign, sched)
+                                    if pin_dep_ts is not None:
+                                        # We just wrote this pin ourselves, so
+                                        # the next poll would read an identity
+                                        # of (cs, pin) where we hold (cs, None)
+                                        # and fire the leg-changed reset --
+                                        # dropping _tracked_was_live, the last
+                                        # position and the schedule cache, and
+                                        # spending a second AirLabs credit, on
+                                        # every blind-tracked flight. Adopting
+                                        # our own write is not a leg change.
+                                        self._tracked_last_identity = (
+                                            tracked_callsign, pin_dep_ts)
                         else:
                             # Already have a schedule — keep it DELAY-AWARE. A
                             # cached departure time used to be frozen until the

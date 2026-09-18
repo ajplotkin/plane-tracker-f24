@@ -391,6 +391,7 @@
                 btn.appendChild(document.createTextNode(
                     `${lg.origin || "???"} → ${lg.destination || "???"}`));
                 const bits = [];
+                if (lg.airline_name) bits.push(lg.airline_name);
                 if (lg.dep_time) bits.push(`departs ${lg.dep_time}`);
                 if (lg.status) bits.push(lg.status);
                 if (bits.length) {

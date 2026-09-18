@@ -147,6 +147,10 @@ def lookup_flight(callsign):
                                 "dep_time": leg.get("dep_time", ""),
                                 "status": leg.get("status", ""),
                                 "scheduled_departure": leg.get("dep_time_ts"),
+                                # Two legs of a codeshare otherwise render
+                                # identically in the picker: same callsign, and
+                                # the route line alone does not say who flies it.
+                                "airline_name": (cr or {}).get("airline_name", ""),
                                 "cached_route": cr,
                             })
                         return {

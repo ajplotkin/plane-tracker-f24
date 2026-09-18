@@ -58,6 +58,12 @@ def test_multi_leg_renders_one_button_per_leg(harness):
     assert harness["multi_buttons"] == 2
 
 
+def test_each_leg_shows_which_airline_flies_it(harness):
+    """Codeshare legs share a callsign and can share a route line; without the
+    operator on the button there is nothing to choose between them."""
+    assert harness["multi_showsAirline"] is True
+
+
 def test_picking_a_leg_posts_that_leg(harness):
     """Picking the SECOND leg must post DEN->GJT, not a bare callsign.
 
@@ -102,9 +108,21 @@ def test_failed_lookup_clears_a_stale_picker(harness):
     assert harness["notFound_legsCleared"] is True
 
 
-def test_server_strings_render_as_text_not_markup(harness):
-    """Leg labels come from upstream data and must not reach an HTML sink."""
-    assert harness["xss_textNotMarkup"] is True
+def test_no_server_string_reaches_an_html_sink(harness):
+    """Every field the picker renders is relayed from AirLabs.
+
+    Counts sink use across ALL elements built during the render, not just the
+    button: the first version of this test asserted ``btn.innerHTML === ""``,
+    which passes unchanged when the markup goes through a child element -- and
+    the sub-line (dep_time, status) is exactly such a child.
+    """
+    assert harness["xss_noHtmlSinkUsed"] is True
+
+
+def test_markup_in_a_field_is_still_shown_as_text(harness):
+    """Escaping must not silently drop the value -- a leg whose status is odd
+    should still read as that odd status, not vanish."""
+    assert harness["xss_markupRenderedAsText"] is True
 
 
 def test_empty_input_clears_a_stale_picker(harness):
@@ -114,3 +132,32 @@ def test_empty_input_clears_a_stale_picker(harness):
     """
     assert harness["emptyInput_legsCleared"] is True
     assert harness["emptyInput_savedNothing"] is True
+
+
+class TestTheOnDemandOtherLegsLink:
+    """A live match never consults AirLabs, so a connection is invisible until
+    asked for -- and asking spends a credit, which is why it is a link rather
+    than automatic. This shipped with no coverage at all."""
+
+    def test_the_link_is_offered_after_a_match(self, harness):
+        assert harness["otherLegs_linkOffered"] is True
+
+    def test_no_credit_is_spent_until_it_is_clicked(self, harness):
+        """The whole point of the link: a normal lookup must stay free."""
+        assert harness["otherLegs_noCreditBeforeClick"] is True
+
+    def test_clicking_asks_the_server_for_that_callsign(self, harness):
+        assert harness["otherLegs_asked"] == "UAL1714"
+
+    def test_the_leg_already_matched_is_not_offered_back(self, harness):
+        """Offering the leg you are already tracking is noise, and picking it
+        would re-save what is already saved."""
+        assert harness["otherLegs_excludesMatchedLeg"] is True
+
+    def test_asking_does_not_change_what_is_tracked(self, harness):
+        """Only clicking a LEG switches the flight; consulting must not."""
+        assert harness["otherLegs_askingChangesNothing"] is True
+
+    def test_a_flight_with_no_continuation_says_so(self, harness):
+        """Not an empty picker, and not silence."""
+        assert harness["otherLegs_noneSaysSo"] is True

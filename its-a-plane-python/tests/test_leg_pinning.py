@@ -969,3 +969,122 @@ class TestLegRepickResetsState:
         r.o._tracked_miss_count = 2
         r.grab()
         assert r.o._tracked_miss_count != 0, "a re-poll reset state it should have kept"
+
+    def test_adopting_our_own_pin_is_not_a_leg_change(self, rig):
+        """The self-pin write-back must not look like the user re-picking.
+
+        A blind track holds identity (callsign, None). The first resolve writes
+        `scheduled_departure` into tracked_flight.json, so the NEXT poll loads
+        (callsign, pin) — a different tuple — and without the guard the
+        leg-changed reset fires on every blind-tracked flight: `_tracked_was_live`
+        drops, the last position and ETA are discarded, the schedule cache is
+        cleared and a second AirLabs credit is spent, `just_became_live` fires
+        again (restarting the scroll), and a poll landing in an oceanic gap has
+        no last position left to estimate from, so the panel blanks.
+        """
+        now = _time.time()
+        dep = now - 1 * HOUR            # already departed: a blind track, live
+        r = rig(_tracked(pin=None))
+        with r.airlabs_returns(_sched(dep, dep + 5 * HOUR)):
+            r.grab()                    # poll 1: cold fetch, self-pins the file
+            assert r.tracked_file()["scheduled_departure"] == int(dep)
+            fetches_after_poll1 = len(r.fetches)
+            # the flight is seen live between the two polls
+            r.o._tracked_was_live = True
+            r.o._tracked_last_data = {"callsign": "UAL353", "is_live": True}
+            r.o._tracked_last_eta = now + 4 * HOUR
+            r.o._tracked_route_cached = {"origin": "EWR", "destination": "LAX"}
+            r.grab()                    # poll 2: same flight, same leg
+
+        assert r.o._tracked_was_live is True, (
+            "the self-pin write-back was read back as a leg change and reset "
+            "the tracker")
+        assert r.o._tracked_last_eta is not None, "ETA discarded by a false reset"
+        assert r.o._tracked_route_cached is not None, "route discarded"
+        assert len(r.fetches) == fetches_after_poll1, (
+            f"a second AirLabs credit was spent re-fetching the leg we just "
+            f"pinned ourselves: {r.fetches}")
+
+
+class TestTheInboundLegIsNotOurLeg:
+    """UA1714 is UAL1714 on BOTH legs, and _grab_tracked matches on callsign
+    alone. While we wait for DEN-GJT, the aircraft flying LGA->DEN carries our
+    callsign and is live. Going live on it is the bug that wipes the pick."""
+
+    ROUTE = {"origin": "DEN", "destination": "GJT"}
+
+    def _live(self, dest, origin="LGA"):
+        return {"callsign": "UAL353", "is_live": True, "origin": origin,
+                "destination": dest, "latitude": 40.0, "longitude": -100.0}
+
+    def test_a_live_match_flying_to_our_origin_is_rejected(self, rig):
+        now = _time.time()
+        pin = now + 20 * 60                      # our leg has not departed
+        r = rig(_tracked(pin=pin, route=self.ROUTE))
+        r.o._grab_tracked = MagicMock(return_value=self._live("DEN"))
+        with r.airlabs_returns(_sched(pin, pin + 2 * HOUR)):
+            r.grab()
+        assert r.o._tracked_was_live is False, (
+            "went live on the INBOUND aircraft — its ETA is now the tracked "
+            "ETA, and when it lands the miss counter wipes the user's pick")
+        assert r.o._tracked_last_data is None, (
+            "stored the inbound's position as the tracked flight's")
+
+    def test_a_live_match_flying_to_OUR_destination_is_accepted(self, rig):
+        """The guard must not be a blanket reject — our own leg going airborne
+        early still has to be picked up."""
+        now = _time.time()
+        pin = now + 20 * 60
+        r = rig(_tracked(pin=pin, route=self.ROUTE))
+        r.o._grab_tracked = MagicMock(return_value=self._live("GJT", origin="DEN"))
+        with r.airlabs_returns(_sched(pin, pin + 2 * HOUR)):
+            r.grab()
+        assert r.o._tracked_was_live is True, "rejected our own leg"
+
+    def test_once_our_leg_is_live_a_different_destination_is_a_diversion(self, rig):
+        """After we have genuinely been live, a changed destination is a
+        diversion and must still be followed, not rejected as the inbound."""
+        now = _time.time()
+        pin = now - 1 * HOUR
+        r = rig(_tracked(pin=pin, route=self.ROUTE))
+        r.o._tracked_was_live = True
+        r.o._tracked_last_callsign = "UA353"
+        r.o._tracked_last_identity = ("UA353", pin)
+        r.o._grab_tracked = MagicMock(return_value=self._live("DEN", origin="DEN"))
+        with r.airlabs_returns(_sched(pin, pin + 2 * HOUR)):
+            r.grab()
+        # NOT _tracked_was_live: nothing ever clears it, so it stays True
+        # whether the match was used or thrown away. last_data is only written
+        # on the accepted-and-live path, so it is what distinguishes them.
+        assert r.o._tracked_last_data is not None, (
+            "a diversion was rejected as the inbound — after our leg has been "
+            "live, a destination equal to our origin is a diversion BACK, and "
+            "the position must still be followed")
+        assert r.o._tracked_last_data.get("destination") == "DEN"
+
+    def test_a_round_trip_whose_origin_is_its_destination_is_not_rejected(self, rig):
+        """origin == destination makes 'flying to our origin' meaningless."""
+        now = _time.time()
+        pin = now + 20 * 60
+        r = rig(_tracked(pin=pin, route={"origin": "DEN", "destination": "DEN"}))
+        r.o._grab_tracked = MagicMock(return_value=self._live("DEN", origin="DEN"))
+        with r.airlabs_returns(_sched(pin, pin + 2 * HOUR)):
+            r.grab()
+        assert r.o._tracked_was_live is True, "rejected a legitimate round trip"
+
+    def test_an_unrelated_destination_is_accepted_not_rejected(self, rig):
+        """The guard is deliberately NARROW: only 'flying to our origin' is
+        proof of the inbound. A live match to somewhere else entirely is more
+        likely a stale or wrong FR24 destination than a different leg, and
+        rejecting on any mismatch would mean never going live at all whenever
+        FR24 and the pinned route disagree.
+        """
+        now = _time.time()
+        pin = now + 20 * 60
+        r = rig(_tracked(pin=pin, route=self.ROUTE))     # DEN -> GJT
+        r.o._grab_tracked = MagicMock(return_value=self._live("ORD", origin="DEN"))
+        with r.airlabs_returns(_sched(pin, pin + 2 * HOUR)):
+            r.grab()
+        assert r.o._tracked_was_live is True, (
+            "rejected a live match on a mere destination mismatch — only a "
+            "match flying to OUR ORIGIN is provably the inbound")

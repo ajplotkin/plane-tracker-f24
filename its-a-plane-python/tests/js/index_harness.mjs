@@ -13,6 +13,16 @@ import vm from "node:vm";
 
 const html = readFileSync(process.argv[2], "utf8");
 const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join("\n");
+// This regex only matches a BARE <script>. Add `type=`, `defer`, or a
+// `</script>` inside a JS string and it silently extracts nothing or too
+// little, and the run dies as `ReferenceError: lookupAndTrack is not defined`
+// -- which reads like a page bug rather than a harness bug. Say so instead.
+if (!/\blookupAndTrack\b/.test(js)) {
+  throw new Error(
+    "harness could not extract the page script: matched " +
+    `${js.length} chars with no lookupAndTrack. If index.html now puts ` +
+    "attributes on <script>, widen the regex in this file.");
+}
 
 class El {
   constructor(tag = "div") {
@@ -26,7 +36,13 @@ class El {
       ? this._text + this.children.map(c => c.textContent).join("")
       : this._text;
   }
-  set innerHTML(v) { this._html = String(v); if (v === "") this.children = []; }
+  // Counted, not just recorded: asserting `btn.innerHTML === ""` only proves
+  // nobody used the sink on THAT element, and the markup that actually bit us
+  // would go through a child div. Clearing (v === "") is not a sink.
+  set innerHTML(v) {
+    this._html = String(v);
+    if (v === "") this.children = []; else htmlSinkHits++;
+  }
   get innerHTML() { return this._html; }
   get innerText() { return this.textContent; }
   appendChild(c) { this.children.push(c); return c; }
@@ -39,9 +55,17 @@ class El {
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
 }
 
+let htmlSinkHits = 0;
+// Seeded from the page's own id="..." attributes. A lazily-created element for
+// ANY id would let a typo'd getElementById keep working here while returning
+// null in a browser -- the harness would prove the opposite of what it claims.
+const pageIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]));
 const els = {};
 const doc = {
-  getElementById: id => (els[id] ||= new El()),
+  getElementById: id => {
+    if (!pageIds.has(id)) return null;
+    return (els[id] ||= new El());
+  },
   createElement: tag => new El(tag),
   // Text nodes are how the picker avoids an innerHTML sink, so the stub has to
   // model them or the very code path under test throws.
@@ -58,7 +82,10 @@ const doc = {
 const posted = [];
 const responses = { lookup: null, legs: null };
 const sandbox = {
-  document: doc, console,
+  document: doc,
+  // Results are parsed from stdout, so anything the PAGE logs would be mixed
+  // into the JSON. Send it to stderr, where it is still visible on failure.
+  console: { ...console, log: (...a) => console.error("[page]", ...a) },
   setInterval: () => 0, setTimeout: (f, t) => setTimeout(f, t),
   fetch: async (url, opts) => {
     const u = String(url), body = opts && opts.body ? JSON.parse(opts.body) : null;
@@ -85,14 +112,21 @@ reset();
 responses.lookup = { found: true, multiple: true, callsign: "UAL1714", summary: "2 legs found — select one",
   flights: [
     { callsign:"UAL1714", origin:"LGA", destination:"DEN", dep_time:"07:29", status:"active",
+      airline_name:"United Express",
       cached_route:{origin:"LGA",destination:"DEN"}, scheduled_departure: 1 },
     { callsign:"UAL1714", origin:"DEN", destination:"GJT", dep_time:"11:34", status:"scheduled",
+      airline_name:"United Express",
       cached_route:{origin:"DEN",destination:"GJT"}, scheduled_departure: 2 },
   ]};
 doc.getElementById("callsign-input").value = "UA1714";
 await api.lookupAndTrack();
 results.multi_savedNothing = setsOnly().length === 0;
 results.multi_buttons = doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn").length;
+// Two legs of a codeshare share a callsign and can share a route line; the
+// operator is what tells them apart, so it has to actually render.
+results.multi_showsAirline = doc.getElementById("leg-picker").children
+  .filter(c => c.className === "leg-btn")
+  .every(c => c.textContent.includes("United Express"));
 
 // 2. picking the SECOND leg sends that leg's route, not a bare callsign.
 // Guarded: if step 1 rendered no picker this must still report, so the failure
@@ -133,11 +167,19 @@ results.notFound_savedNothing = setsOnly().length === 0;
 results.notFound_legsCleared =
   doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn").length === 0;
 
-// 6. markup in a server field must not become HTML
+// 6. markup in ANY server-supplied field must not reach an HTML sink.
+// Every one of these five is relayed from AirLabs, and the sub-line fields
+// (dep_time, status) are rendered by a different element than the label, so a
+// leg carrying only an `origin` never even builds that element.
 reset();
-api.showLegs([{callsign:"X", origin:'<img src=x onerror="boom()">', destination:"DEN"}]);
-const b = doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn")[0];
-results.xss_textNotMarkup = b.textContent.includes("<img") && b.innerHTML === "";
+const XSS = '<img src=x onerror="boom()">';
+htmlSinkHits = 0;
+api.showLegs([{ callsign: XSS, origin: XSS, destination: XSS,
+                dep_time: XSS, status: XSS }]);
+results.xss_noHtmlSinkUsed = htmlSinkHits === 0;
+const _b = doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn")[0];
+// and the markup must still be VISIBLE as text, not silently dropped
+results.xss_markupRenderedAsText = !!_b && _b.textContent.split(XSS).length - 1 >= 4;
 
 // 7. Track pressed with an EMPTY box must still drop a stale picker.
 // lookupAndTrack returns early on empty input, so the per-branch clears never
@@ -150,5 +192,60 @@ await api.lookupAndTrack();
 results.emptyInput_legsCleared =
   doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn").length === 0;
 results.emptyInput_savedNothing = setsOnly().length === 0;
+
+// 8-10. The on-demand "other legs" link. A live match never consulted AirLabs,
+// so a continuation is invisible until asked for -- and asking costs a credit,
+// which is why it is a link and not automatic. None of this had any coverage.
+reset();
+responses.lookup = { found: true, callsign: "UAL1714", summary: "UA1714 LGA→DEN",
+  origin: "LGA", destination: "DEN",
+  cached_route: { origin: "LGA", destination: "DEN" }, scheduled_departure: 99 };
+doc.getElementById("callsign-input").value = "UA1714";
+await api.lookupAndTrack();
+const _link = doc.getElementById("other-legs").children[0];
+results.otherLegs_linkOffered = !!_link && _link.textContent.includes("UAL1714");
+// Nothing is spent until the link is clicked.
+results.otherLegs_noCreditBeforeClick =
+  posted.filter(p => p.url.includes("/tracked/legs")).length === 0;
+// A live single match legitimately saves at lookup time; what must NOT happen
+// is the link changing the tracked flight merely by being consulted.
+const _savesBeforeClick = setsOnly().length;
+
+// Clicking asks the server, and the leg we already matched is not offered back.
+responses.legs = { legs: [
+  { callsign:"UAL1714", origin:"LGA", destination:"DEN",
+    cached_route:{origin:"LGA",destination:"DEN"}, scheduled_departure: 99 },
+  { callsign:"UAL1714", origin:"DEN", destination:"GJT",
+    cached_route:{origin:"DEN",destination:"GJT"}, scheduled_departure: 2 },
+]};
+_link.click();
+await new Promise(r => setTimeout(r, 50));
+results.otherLegs_asked =
+  posted.filter(p => p.url.includes("/tracked/legs"))
+        .map(p => p.body && p.body.callsign)[0] || null;
+const _offered = doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn");
+results.otherLegs_excludesMatchedLeg =
+  _offered.length === 1 && _offered[0].textContent.includes("GJT")
+  && !_offered[0].textContent.includes("LGA");
+// Offering other legs is not switching to one: only a click on a LEG does that.
+results.otherLegs_askingChangesNothing = setsOnly().length === _savesBeforeClick;
+
+// A flight with no continuation must say so, not render an empty picker.
+reset();
+responses.lookup = { found: true, callsign: "UAL1714", summary: "UA1714 LGA→DEN",
+  origin: "LGA", destination: "DEN",
+  cached_route: { origin: "LGA", destination: "DEN" }, scheduled_departure: 99 };
+doc.getElementById("callsign-input").value = "UA1714";
+await api.lookupAndTrack();
+responses.legs = { legs: [
+  { callsign:"UAL1714", origin:"LGA", destination:"DEN",
+    cached_route:{origin:"LGA",destination:"DEN"}, scheduled_departure: 99 },
+]};
+doc.getElementById("other-legs").children[0].click();
+await new Promise(r => setTimeout(r, 50));
+results.otherLegs_noneSaysSo =
+  doc.getElementById("other-legs").textContent.includes("No other legs")
+  && doc.getElementById("leg-picker").children
+       .filter(c => c.className === "leg-btn").length === 0;
 
 console.log(JSON.stringify(results, null, 2));

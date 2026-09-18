@@ -80,7 +80,7 @@ class TestEuropeanCodes:
         """None of these were in the map, which is the other half of why LX561
         failed: the prefix swap had nothing to swap to."""
         assert IATA_TO_ICAO.get("LX") == "SWR"   # Swiss
-        assert IATA_TO_ICAO.get("2L") == "OAW"   # Helvetic — operates LX561
+        assert IATA_TO_ICAO.get("2L") == "OAW"   # Helvetic — one reported operator
         assert IATA_TO_ICAO.get("BT") == "BTI"   # airBaltic — also ACMI for Swiss
 
     def test_the_map_did_not_lose_its_us_entries(self):
