@@ -490,10 +490,19 @@ class _Rig:
     def warm(self, sched, callsign="UA353"):
         """Pre-seed the schedule cache as a poll two-or-later would find it.
 
-        _tracked_last_callsign has to match, or _grab treats this as a brand
-        new tracked flight and clears the cache before reading it.
+        The tracked IDENTITY has to match, or _grab treats this as a brand new
+        tracked flight and clears the cache before reading it. That identity is
+        (callsign, scheduled_departure), not the callsign alone — one flight
+        number can cover several legs in a day and they share a callsign, so a
+        callsign-only key cannot tell a leg change from a re-poll.
+
+        The pin is read from the tracked file this rig was built with, rather
+        than passed in: every caller would otherwise have to remember to keep
+        the two in step, and a mismatch shows up as a silently-reset tracker
+        rather than an error.
         """
         self.o._tracked_last_callsign = callsign
+        self.o._tracked_last_identity = (callsign, self.tracked_file().get("scheduled_departure"))
         self.o._tracked_schedule_cache[callsign] = sched
 
     def tracked_file(self):
@@ -829,6 +838,7 @@ class TestWasLiveNoEtaRealityCheck:
         r.o._tracked_last_data = {"callsign": "UAL353", "is_live": True,
                                   "ground_speed": 400, "last_seen_ts": now - 600}
         r.o._tracked_last_callsign = "UA353"
+        r.o._tracked_last_identity = ("UA353", pin)
         if cached is not None:
             r.warm(cached)
         for _ in range(misses):
@@ -910,3 +920,52 @@ def test_the_age_cap_runs_before_the_fr24_fetch():
     assert cap < fetch, (
         "the 36h cap is back behind the FR24 zone fetch, so an outage that "
         "aborts the poll preserves a zombie past the cap")
+
+
+class TestLegRepickResetsState:
+    """Switching to a DIFFERENT LEG of the SAME flight number must reset the
+    tracker, exactly as switching callsigns does.
+
+    Found by review. The reset keyed on the callsign alone, and both legs of
+    UA1714 are "UAL1714" — they differ only by scheduled_departure. So picking
+    the connection while the inbound was still airborne reset nothing:
+    _tracked_was_live stayed True, which bypasses the 30-minutes-before-
+    departure guard, so FR24 was polled at once, matched the INBOUND under that
+    same callsign, and auto-wiped the freshly-picked connection when it landed.
+    """
+
+    def test_same_callsign_different_leg_is_treated_as_a_new_flight(self, rig):
+        now = _time.time()
+        leg1 = now - 2 * HOUR          # the inbound, already airborne
+        leg2 = now + 3 * HOUR          # the connection just picked
+        r = rig(_tracked(pin=leg1))
+        r.o._tracked_was_live = True
+        r.o._tracked_last_callsign = "UA353"
+        r.o._tracked_last_identity = ("UA353", leg1)
+        r.o._tracked_miss_count = 2
+
+        # the user picks the other leg: same callsign, new scheduled_departure
+        with open(r.file, "w", encoding="utf-8") as f:
+            json.dump(_tracked(pin=leg2), f)
+        r.grab()
+
+        assert r.o._tracked_was_live is False, (
+            "state survived a leg change — the departure guard is bypassed and "
+            "the connection will be matched against the inbound aircraft")
+        # Reset to 0, then this same _grab increments it once for the miss —
+        # so <=1 proves it was cleared, where without the fix it would be 3.
+        assert r.o._tracked_miss_count <= 1, (
+            f"miss count {r.o._tracked_miss_count} kept climbing from the "
+            f"previous leg instead of resetting")
+        assert r.o._tracked_last_identity == ("UA353", leg2)
+
+    def test_the_same_leg_re_polled_is_not_treated_as_new(self, rig):
+        """The guard must not fire on every poll, or nothing accumulates."""
+        now = _time.time()
+        pin = now + 3 * HOUR
+        r = rig(_tracked(pin=pin))
+        r.o._tracked_last_callsign = "UA353"
+        r.o._tracked_last_identity = ("UA353", pin)
+        r.o._tracked_miss_count = 2
+        r.grab()
+        assert r.o._tracked_miss_count != 0, "a re-poll reset state it should have kept"

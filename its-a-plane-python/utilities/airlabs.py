@@ -309,7 +309,15 @@ def get_flight_legs(callsign):
         now = time()
         upcoming = [
             s for s in schedules
-            if s.get("dep_time_ts") and s["dep_time_ts"] > now - 3600
+            # Keep a leg until it ARRIVES, not for an hour after it departs.
+            # The old rule was `dep_time_ts > now - 3600`, which drops a leg
+            # 60 minutes after pushback — so a transcon still three hours from
+            # its destination vanished from the list while very much in the
+            # air. Fall back to the departure window only when AirLabs gives
+            # us no arrival time.
+            if s.get("dep_time_ts") and (
+                (s.get("arr_time_ts") and s["arr_time_ts"] > now)
+                or s["dep_time_ts"] > now - 3600)
         ]
         if not upcoming:
             upcoming = schedules
@@ -326,6 +334,12 @@ def get_flight_legs(callsign):
                 "arr_time_utc": s.get("arr_time_utc", ""),
                 "status": s.get("status", ""),
                 "airline_iata": s.get("airline_iata", ""),
+                # Carried so a leg chosen from the picker can name its airline.
+                # _build_cached_route looks the name up from airline_icao, and
+                # without it every picked leg showed a blank carrier on the
+                # pre-departure panel.
+                "airline_icao": s.get("airline_icao", ""),
+                "arr_time_ts": s.get("arr_time_ts"),
                 "flight_number": s.get("flight_iata", callsign),
                 "cs_airline_iata": s.get("cs_airline_iata", ""),
                 "duration": s.get("duration"),

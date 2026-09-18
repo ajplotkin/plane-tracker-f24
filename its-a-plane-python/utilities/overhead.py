@@ -865,6 +865,16 @@ class Overhead:
         self._TRACKED_MISS_THRESHOLD = 3     # fallback miss threshold (no ETA)
         self._MAX_TRACKED_HOURS = 36         # hard staleness cap for tracked flights
         self._tracked_last_callsign = ""     # last callsign we polled for
+        # (callsign, scheduled_departure). The callsign ALONE cannot identify
+        # a tracked flight: one number can cover several legs in a day
+        # (UA1714 is LGA-DEN and then DEN-GJT), they share a callsign, and the
+        # leg is carried by scheduled_departure. Keying the reset on callsign
+        # meant switching legs reset NOTHING — _tracked_was_live stayed True
+        # from the leg already airborne, which bypasses the departure guard
+        # below, so FR24 was polled at once, matched the INBOUND aircraft
+        # under that same callsign, and auto-wiped the freshly-picked
+        # connection when the inbound landed.
+        self._tracked_last_identity = None
         self._tracked_last_eta = None        # last known estimated arrival (unix ts)
         self._tracked_last_data = None       # last known good tracked data
         self._tracked_schedule_cache = {}    # callsign -> AirLabs schedule result (or None)
@@ -1276,8 +1286,10 @@ class Overhead:
             if tracked_callsign:
                 stats["tracked_callsign"] = tracked_callsign
 
-                # If callsign changed, reset all state — new flight being tracked
-                if tracked_callsign != self._tracked_last_callsign:
+                # Reset when the tracked LEG changes, not merely the callsign.
+                _identity = (tracked_callsign, scheduled_dep)
+                if _identity != self._tracked_last_identity:
+                    self._tracked_last_identity = _identity
                     self._tracked_last_callsign = tracked_callsign
                     self._tracked_was_live = False
                     self._tracked_miss_count = 0
@@ -1414,7 +1426,25 @@ class Overhead:
                             total = haversine(o_lat, o_lon, d_lat, d_lon)
                             to_o = haversine(p_lat, p_lon, o_lat, o_lon)
                             to_d = haversine(p_lat, p_lon, d_lat, d_lon)
-                            if total > 0 and (to_o + to_d) > total * 1.25:
+                            # A route whose endpoints coincide is not a route.
+                            # origin_lat/lon ALWAYS come from cached_route (FR24
+                            # never sends them) while dest_lat/lon come from the
+                            # live match — so tracking DEN-GJT while FR24 returns
+                            # the INBOUND LGA-DEN under the same callsign gives
+                            # haversine(DEN, DEN) == 0. The old `total > 0` guard
+                            # then skipped the check altogether and accepted the
+                            # wrong aircraft silently; the aircraft could be over
+                            # Sydney and still pass.
+                            if total < 1:
+                                _plausible = False
+                                logger.warning(
+                                    f"Tracked flight route degenerate for "
+                                    f"{tracked_callsign}: cached origin "
+                                    f"{new_route.get('origin')} coincides with live "
+                                    f"destination {new_route.get('destination')} — "
+                                    f"this looks like the inbound leg, not ours"
+                                )
+                            elif (to_o + to_d) > total * 1.25:
                                 _plausible = False
                                 logger.warning(
                                     f"Tracked flight position implausible for "
@@ -1885,6 +1915,7 @@ class Overhead:
         self._tracked_schedule_cache.clear()
         tracked_schedule.forget()   # keep the refresh cadence in lockstep
         self._tracked_last_callsign = ""
+        self._tracked_last_identity = None
         self._tracked_alt_callsign = ""
         self._tracked_route_cached = None
 

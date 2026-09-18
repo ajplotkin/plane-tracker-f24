@@ -127,6 +127,25 @@
         }
         .confirm-row .btn-save { background: #ffb000; color: #000; }
         .confirm-row .btn-cancel { background: #1a1a1a; color: #ffb000; }
+        /* Leg picker — shown when one flight number covers several legs
+           (e.g. UA1714 LGA-DEN then DEN-GJT). Both legs share a callsign, so
+           the choice is carried by cached_route, not by the callsign. */
+        /* On-demand "other legs" link. A lookup that matches a live flight
+           never asks AirLabs, so a continuation is invisible; this fetches it
+           only when asked, so a normal search still costs no credits. */
+        #other-legs { margin-top: 8px; display: none; font-size: 13px; }
+        #other-legs a { color: #8a6000; text-decoration: underline; cursor: pointer; }
+        #other-legs a:hover { color: #ffb000; }
+        #leg-picker { margin-top: 10px; display: none; }
+        #leg-picker .leg-btn {
+            display: block; width: 100%; text-align: left;
+            font-family: 'VT323', 'Courier New', monospace; font-size: 17px;
+            padding: 7px 12px; margin-bottom: 6px; cursor: pointer;
+            background: #1a1a1a; color: #ffb000; border: 1px solid #ffb000;
+        }
+        #leg-picker .leg-btn:hover { background: #ffb000; color: #000; }
+        #leg-picker .leg-sub { font-size: 13px; color: #8a6000; }
+        #leg-picker .leg-btn:hover .leg-sub { color: #3a2a00; }
         hr { border: none; border-top: 1px solid #333; margin: 20px 0; }
         .note { font-size: 12px; color: #555; margin-top: 10px; }
         .links { margin-top: 16px; }
@@ -158,6 +177,8 @@
             <button class="clear" onclick="clearTracked()">Clear</button>
         </div>
         <div id="track-status"></div>
+        <div id="other-legs"></div>
+        <div id="leg-picker"></div>
         <div class="confirm-row" id="confirm-row">
             <button class="btn-save" onclick="saveAnyway()">Save anyway</button>
             <button class="btn-cancel" onclick="cancelSave()">Cancel</button>
@@ -215,6 +236,12 @@
 
         async function lookupAndTrack() {
             const val = document.getElementById("callsign-input").value.trim().toUpperCase();
+            // Clear any previous result up front. Leaving the old picker up
+            // meant a failed lookup for a DIFFERENT flight still showed the
+            // last flight's legs, and clicking one saved it while the status
+            // line talked about the flight that had just failed.
+            showLegs(null);
+            showOtherLegsLink(null);
             if (!val) return;
 
             const btn = document.getElementById("btn-track");
@@ -231,25 +258,161 @@
                 });
                 const data = await res.json();
 
-                if (data.found) {
+                const _legs = data.flights || [];
+                if (data.multiple && _legs.length === 1) {
+                    // Contract hole: `multiple` with a single leg used to fall
+                    // through to the success branch and save a BARE callsign,
+                    // throwing away the one leg's cached_route — the very field
+                    // that identifies which leg was meant.
+                    showLegs(null);
+                    showOtherLegsLink(null);
+                    const lg = _legs[0];
+                    await saveCallsign(lg.callsign || data.callsign, lg.cached_route,
+                                       lg.scheduled_departure);
+                    setStatus(`✓ Tracking ${lg.callsign || data.callsign}: ` +
+                              `${lg.origin || "???"} → ${lg.destination || "???"}`, "found");
+                    document.getElementById("callsign-input").value = "";
+                    showConfirm(false);
+                } else if (data.multiple && _legs.length > 1) {
+                    // One flight number, several legs (UA1714 is LGA-DEN then
+                    // DEN-GJT). The server has always returned these; the UI
+                    // used to fall into the `found` branch below, save the
+                    // callsign immediately, and print "— select one" as if it
+                    // were a success message, with nothing to select.
+                    showLegs(data.flights);
+                    showOtherLegsLink(null);
+                    setStatus(data.summary, "not-found");
+                    showConfirm(false);
+                } else if (data.found) {
                     // Flight found — save automatically using the actual callsign
-                    await saveCallsign(data.callsign);
+                    showLegs(null);
+                    await saveCallsign(data.callsign, data.cached_route,
+                                       data.scheduled_departure);
                     setStatus(`✓ Found & saved: ${data.summary}`, "found");
                     document.getElementById("callsign-input").value = "";
                     showConfirm(false);
+                    // A live match never consulted AirLabs, so a continuation
+                    // is invisible until asked for.
+                    showOtherLegsLink(data.callsign,
+                        { origin: data.origin, destination: data.destination });
                 } else {
                     // Not found — prompt to save anyway
                     pendingCallsign = val;
+                    showLegs(null);
+                    showOtherLegsLink(null);
                     setStatus(`Flight "${val}" not found — it may not be airborne yet, or may not be supported. You can save it anyway and it will appear when the flight goes live.`, "not-found");
                     showConfirm(true);
                 }
             } catch (e) {
                 setStatus("Lookup failed — check your connection.", "error");
                 showConfirm(false);
+                showLegs(null);
+                showOtherLegsLink(null);
             }
 
             btn.disabled = false;
             btn.textContent = "Track";
+        }
+
+        // Offer to look up the rest of the day for this flight number. Only
+        // shown after a match, and only spends a credit when clicked.
+        // `exclude` is the leg we already matched, so it is not offered back.
+        // get_flight_legs returns only UPCOMING legs, so once the first leg has
+        // landed the continuation is the ONLY entry — a "more than one leg"
+        // threshold would report "no other legs" while the connection sits
+        // right there. Compare routes instead of counting.
+        let otherLegsFor = "", otherLegsExclude = null;
+        function showOtherLegsLink(callsign, exclude) {
+            const el = document.getElementById("other-legs");
+            otherLegsFor = callsign || "";
+            otherLegsExclude = exclude || null;
+            if (!callsign) { el.style.display = "none"; el.innerHTML = ""; return; }
+            el.innerHTML = "";
+            const a = document.createElement("a");
+            a.addEventListener("click", loadOtherLegs);
+            a.textContent = `Does ${callsign} fly another leg today?`;
+            el.appendChild(a);
+            el.style.display = "block";
+        }
+
+        async function loadOtherLegs() {
+            if (!otherLegsFor) return;
+            const el = document.getElementById("other-legs");
+            el.innerHTML = "Checking…";
+            try {
+                const res = await fetch("/tracked/legs", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ callsign: otherLegsFor })
+                });
+                const data = await res.json();
+                const all = data.legs || [];
+                const ex = otherLegsExclude;
+                const legs = ex
+                    ? all.filter(l => !(l.origin === ex.origin && l.destination === ex.destination))
+                    : all;
+                if (legs.length) {
+                    showLegs(legs);
+                    setStatus(
+                        `${legs.length} other leg${legs.length > 1 ? "s" : ""} for ${otherLegsFor} — select one to track instead`,
+                        "not-found");
+                    el.style.display = "none";
+                    el.innerHTML = "";
+                } else {
+                    el.textContent = `No other legs for ${otherLegsFor} today.`;
+                    el.style.color = "#555";
+                }
+            } catch (e) {
+                el.textContent = "Could not check other legs.";
+                el.style.color = "#555";
+            }
+        }
+
+        // Render one button per leg. The leg is identified by its
+        // cached_route, not its callsign — every leg here shares a callsign.
+        let pendingLegs = [];
+        function showLegs(legs) {
+            const el = document.getElementById("leg-picker");
+            pendingLegs = legs || [];
+            if (!legs || !legs.length) {
+                el.style.display = "none";
+                el.innerHTML = "";
+                return;
+            }
+            // Built as DOM nodes rather than an innerHTML template: these
+            // strings are airline/airport fields relayed from AirLabs, and an
+            // innerHTML sink here executed markup arriving in any of them
+            // (verified: an origin of `<img src=x onerror=...>` fired).
+            el.innerHTML = "";
+            legs.forEach((lg, i) => {
+                const btn = document.createElement("button");
+                btn.className = "leg-btn";
+                btn.addEventListener("click", () => pickLeg(i));
+                btn.appendChild(document.createTextNode(
+                    `${lg.origin || "???"} → ${lg.destination || "???"}`));
+                const bits = [];
+                if (lg.dep_time) bits.push(`departs ${lg.dep_time}`);
+                if (lg.status) bits.push(lg.status);
+                if (bits.length) {
+                    const sub = document.createElement("div");
+                    sub.className = "leg-sub";
+                    sub.textContent = bits.join(" · ");
+                    btn.appendChild(sub);
+                }
+                el.appendChild(btn);
+            });
+            el.style.display = "block";
+        }
+
+        async function pickLeg(i) {
+            const lg = pendingLegs[i];
+            if (!lg) return;
+            await saveCallsign(lg.callsign, lg.cached_route, lg.scheduled_departure);
+            setStatus(`✓ Tracking ${lg.callsign}: ${lg.origin || "???"} → ${lg.destination || "???"}`,
+                      "found");
+            showLegs(null);
+            showOtherLegsLink(null);
+            document.getElementById("callsign-input").value = "";
         }
 
         async function saveAnyway() {
@@ -267,11 +430,20 @@
             pendingCallsign = "";
         }
 
-        async function saveCallsign(callsign) {
+        // cachedRoute / schedDep come straight from the lookup response.
+        // They were previously dropped, so /tracked/set only ever received a
+        // callsign — and the two legs of one flight number are INDISTINGUISHABLE
+        // by callsign alone, which is why picking a leg needs them. They also
+        // give the tracker its route and departure time before the aircraft is
+        // airborne, instead of waiting on a runtime schedule lookup.
+        async function saveCallsign(callsign, cachedRoute, schedDep) {
+            const body = { callsign: callsign };
+            if (cachedRoute) body.cached_route = cachedRoute;
+            if (schedDep) body.scheduled_departure = schedDep;
             await fetch("/tracked/set", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ callsign: callsign })
+                body: JSON.stringify(body)
             });
             loadCurrent();
         }
@@ -285,6 +457,8 @@
             document.getElementById("callsign-input").value = "";
             setStatus("Tracking cleared.", "saved");
             showConfirm(false);
+            showLegs(null);
+            showOtherLegsLink(null);
             pendingCallsign = "";
             loadCurrent();
         }

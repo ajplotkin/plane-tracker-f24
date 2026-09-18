@@ -196,7 +196,6 @@ def lookup_flight(callsign):
 
         # Build cached route from live FR24 data
         from utilities.overhead import _airport_coords
-        fp = details.get("flight_progress") or {} if details else {}
         time_info = details.get("time") or {} if details else {}
         sched = (time_info.get("scheduled") or {})
         real = (time_info.get("real") or {})
@@ -278,6 +277,46 @@ def tracked_lookup():
         return jsonify({"found": False, "error": "No callsign provided"})
     result = lookup_flight(callsign)
     return jsonify(result)
+
+
+@app.post("/tracked/legs")
+def tracked_legs():
+    """All scheduled legs for a flight number, on demand.
+
+    Deliberately NOT part of /tracked/lookup. That endpoint short-circuits on a
+    live FR24 match and never asks AirLabs, which is why a flight already in the
+    air offered no choice of leg: UA1714 flying LGA-DEN hid its own DEN-GJT
+    continuation, and that is exactly when you want the later leg — you are
+    waiting at the connecting airport for the inbound.
+
+    Folding a leg check into every lookup would spend an AirLabs credit on every
+    search, including the overwhelming majority that are single-leg flights.
+    This is a separate call so the cost lands only when someone actually asks
+    "what else does this number do today?".
+    """
+    data = request.get_json(force=True)
+    if not data:
+        return jsonify({"legs": [], "error": "Invalid request"}), 400
+    callsign = data.get("callsign", "").strip().upper()
+    if not callsign:
+        return jsonify({"legs": [], "error": "No callsign provided"})
+    try:
+        from utilities.airlabs import get_flight_legs
+        legs = get_flight_legs(callsign) or []
+        out = []
+        for leg in legs:
+            out.append({
+                "callsign": callsign,
+                "origin": leg.get("origin", ""),
+                "destination": leg.get("destination", ""),
+                "dep_time": leg.get("dep_time", ""),
+                "status": leg.get("status", ""),
+                "scheduled_departure": leg.get("dep_time_ts"),
+                "cached_route": _build_cached_route(leg),
+            })
+        return jsonify({"legs": out, "count": len(out)})
+    except Exception as e:
+        return jsonify({"legs": [], "error": str(e)}), 500
 
 
 @app.post("/tracked/set")
@@ -722,7 +761,6 @@ def api_system():
         if "=" in ts_line:
             ts_str = ts_line.split("=", 1)[1].strip()
             if ts_str:
-                from datetime import datetime as _dt
                 # Parse systemctl timestamp
                 start = subprocess.run(
                     ["date", "-d", ts_str, "+%s"],
@@ -1195,7 +1233,6 @@ def api_display_state():
     processing unless someone is actively viewing the display page.
     """
     import time as _t
-    from datetime import datetime, timezone
 
     CACHE_DIR = os.path.join(BASE_DIR, ".cache")
 
