@@ -8,6 +8,11 @@ Swiss (LX/SWR) and OPERATED by Helvetic Airways (2L/OAW), and reports its ICAO
 code as SWR561 — but the aircraft actually flew as SWR1PX, a callsign containing
 no flight number at all, which AirLabs has no record of.
 
+The operator is not stable: c0wsaysmoo reports airBaltic (BT/BTI) metal on this
+route, and AirLabs reported Helvetic for the date checked here. Don't read "2L"
+below as a fact about LX561 — it is one reported operator, and the fix works
+precisely because it stops depending on which one it is.
+
 European carriers routinely fly alphanumeric callsigns decoupled from the
 ticketed number so that similar-sounding callsigns stay off one frequency. US
 carriers mostly still fly UAL1234 for UA1234, which is why this never showed up

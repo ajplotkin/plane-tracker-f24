@@ -185,10 +185,15 @@ def callsign_prefixes(sched):
       3. the MARKETING carrier's ICAO   — European wet-leases
 
     (3) is the one that was missing. LX561 NCE-ZRH is marketed by Swiss
-    (LX/SWR), operated by Helvetic (2L/OAW), and flies as SWR1PX — the
-    marketing carrier's prefix, with a callsign carrying no flight number at
-    all. Filtering only by the operator looked for OAW while the aircraft
-    squawked SWR, so the route search could never match it.
+    (LX/SWR) and flies as SWR1PX — the marketing carrier's prefix, with a
+    callsign carrying no flight number at all.
+
+    The OPERATOR is not fixed. AirLabs reported 2L (Helvetic) for the date
+    looked up here; c0wsaysmoo observed airBaltic metal (BT/BTI) on the route.
+    Wet-lease capacity rotates, so filtering on the operator's prefix looks for
+    OAW or BTI while the aircraft squawks SWR, and the route search could never
+    match it. That is the argument for (3), and it does not depend on which
+    operator happens to be reported.
 
     Order matters: the operator comes first so US regionals, which really do
     fly under their own callsign, still resolve exactly as before.
