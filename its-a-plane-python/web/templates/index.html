@@ -136,6 +136,17 @@
         #other-legs { margin-top: 8px; display: none; font-size: 13px; }
         #other-legs a { color: #8a6000; text-decoration: underline; cursor: pointer; }
         #other-legs a:hover { color: #ffb000; }
+        #queue-list { margin-top: 10px; display: none; font-size: 14px; }
+        #queue-list .queue-hd { color: #555; margin-bottom: 4px; }
+        #queue-list .queue-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 0; border-bottom: 1px solid #eee;
+        }
+        #queue-list .queue-pos { color: #888; min-width: 18px; }
+        #queue-list .queue-rm {
+            margin-left: auto; cursor: pointer; border: 0; background: none;
+            color: #a00; font-size: 16px; line-height: 1; padding: 0 4px;
+        }
         #leg-picker { margin-top: 10px; display: none; }
         #leg-picker .leg-btn {
             display: block; width: 100%; text-align: left;
@@ -174,9 +185,11 @@
         <div class="track-row">
             <input type="text" id="callsign-input" placeholder="e.g. UAL1134" maxlength="10" />
             <button id="btn-track" onclick="lookupAndTrack()">Track</button>
+            <button id="btn-queue" onclick="lookupAndQueue()">Queue next</button>
             <button class="clear" onclick="clearTracked()">Clear</button>
         </div>
         <div id="track-status"></div>
+        <div id="queue-list"></div>
         <div id="other-legs"></div>
         <div id="leg-picker"></div>
         <div class="confirm-row" id="confirm-row">
@@ -219,6 +232,7 @@
                 document.getElementById("current-tracked").textContent = data.callsign
                     ? `Currently tracking: ${data.callsign}`
                     : "Not currently tracking any flight.";
+                showQueue(data.queue || []);
             } catch (e) {
                 document.getElementById("current-tracked").textContent = "Could not load status.";
             }
@@ -368,6 +382,49 @@
             }
         }
 
+        // The legs waiting behind the current flight. Built as DOM nodes for
+        // the same reason the picker is: these strings come from upstream data.
+        function showQueue(queue) {
+            const el = document.getElementById("queue-list");
+            el.innerHTML = "";
+            if (!queue.length) { el.style.display = "none"; return; }
+            const hd = document.createElement("div");
+            hd.className = "queue-hd";
+            hd.textContent = `Up next (switches automatically when the current flight ends):`;
+            el.appendChild(hd);
+            queue.forEach((lg, i) => {
+                const row = document.createElement("div");
+                row.className = "queue-item";
+                const pos = document.createElement("span");
+                pos.className = "queue-pos";
+                pos.textContent = `${i + 1}.`;
+                row.appendChild(pos);
+                const what = document.createElement("span");
+                const r = lg.cached_route || {};
+                what.textContent = r.origin && r.destination
+                    ? `${lg.callsign} — ${r.origin} → ${r.destination}`
+                    : lg.callsign;
+                row.appendChild(what);
+                const rm = document.createElement("button");
+                rm.className = "queue-rm";
+                rm.title = "Remove from queue";
+                rm.textContent = "\u00d7";
+                rm.addEventListener("click", () => removeQueued(i));
+                row.appendChild(rm);
+                el.appendChild(row);
+            });
+            el.style.display = "block";
+        }
+
+        async function removeQueued(i) {
+            await fetch("/tracked/queue/remove", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ index: i })
+            });
+            loadCurrent();
+        }
+
         // Render one button per leg. The leg is identified by its
         // cached_route, not its callsign — every leg here shares a callsign.
         let pendingLegs = [];
@@ -437,11 +494,22 @@
         // by callsign alone, which is why picking a leg needs them. They also
         // give the tracker its route and departure time before the aircraft is
         // airborne, instead of waiting on a runtime schedule lookup.
+        // When true, a resolved leg is appended to the queue instead of
+        // replacing what is on screen now. Reusing one lookup path means the
+        // picker, the not-found prompt and the other-legs link all behave
+        // identically for a queued leg — there is no second flow to keep in step.
+        let queueMode = false;
+
+        async function lookupAndQueue() {
+            queueMode = true;
+            try { await lookupAndTrack(); } finally { queueMode = false; }
+        }
+
         async function saveCallsign(callsign, cachedRoute, schedDep) {
             const body = { callsign: callsign };
             if (cachedRoute) body.cached_route = cachedRoute;
             if (schedDep) body.scheduled_departure = schedDep;
-            await fetch("/tracked/set", {
+            await fetch(queueMode ? "/tracked/queue" : "/tracked/set", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body)

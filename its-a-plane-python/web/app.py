@@ -337,6 +337,14 @@ def tracked_set():
             payload["cached_route"] = cached_route
         if sched_dep:
             payload["scheduled_departure"] = sched_dep
+        # This rewrites the whole file, so the queue has to be carried across or
+        # changing what is tracked NOW would silently throw away what is next.
+        # Clearing tracking outright is the one case that clears the queue too:
+        # an empty callsign means "stop", not "stop and then start again".
+        if callsign:
+            existing = load_json(TRACKED_FILE, {}) or {}
+            if existing.get("queue"):
+                payload["queue"] = existing["queue"]
         with open(TRACKED_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f)
         try:
@@ -354,6 +362,87 @@ def tracked_set():
         return jsonify({"message": msg})
     except Exception as e:
         return jsonify({"message": f"Error saving: {e}"}), 500
+
+
+@app.post("/tracked/queue")
+def tracked_queue_add():
+    """Append a leg to track after the current one finishes.
+
+    Deliberately NOT a scheduled hand-off. The tracker advances when the
+    current flight completes, so a delay postpones the switch instead of
+    racing it — two legs of one itinerary can never both be wanted at once.
+    """
+    data = request.get_json(force=True) or {}
+    callsign = data.get("callsign", "").strip().upper()[:10]
+    if not callsign:
+        return jsonify({"message": "No callsign provided"}), 400
+    leg = {"callsign": callsign}
+    if data.get("cached_route"):
+        leg["cached_route"] = data["cached_route"]
+    if data.get("scheduled_departure"):
+        leg["scheduled_departure"] = data["scheduled_departure"]
+    try:
+        doc = load_json(TRACKED_FILE, {}) or {}
+        queue = list(doc.get("queue") or [])
+
+        # Nothing is being tracked, so there is no completion to wait for and a
+        # queued leg would sit there forever. "Next" with nothing current means
+        # now.
+        if not (doc.get("callsign") or "").strip():
+            doc = {"callsign": callsign, "set_ts": int(_time.time()), "queue": queue}
+            if leg.get("cached_route"):
+                doc["cached_route"] = leg["cached_route"]
+            if leg.get("scheduled_departure"):
+                doc["scheduled_departure"] = leg["scheduled_departure"]
+            with open(TRACKED_FILE, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            try:
+                os.chmod(TRACKED_FILE, 0o666)
+            except OSError:
+                pass
+            return jsonify({"message": f"Nothing was being tracked — now tracking {callsign}.",
+                            "queue": queue, "started_now": True})
+
+        if len(queue) >= 8:
+            return jsonify({"message": "Queue is full (8 legs)."}), 400
+        queue.append(leg)
+        doc["queue"] = queue
+        with open(TRACKED_FILE, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        try:
+            os.chmod(TRACKED_FILE, 0o666)
+        except OSError:
+            pass
+        return jsonify({"message": f"{callsign} queued.", "queue": queue})
+    except Exception as e:
+        return jsonify({"message": f"Error queueing: {e}"}), 500
+
+
+@app.post("/tracked/queue/remove")
+def tracked_queue_remove():
+    """Drop one queued leg by position."""
+    data = request.get_json(force=True) or {}
+    try:
+        idx = int(data.get("index", -1))
+    except (TypeError, ValueError):
+        return jsonify({"message": "Invalid index"}), 400
+    try:
+        doc = load_json(TRACKED_FILE, {}) or {}
+        queue = list(doc.get("queue") or [])
+        if not 0 <= idx < len(queue):
+            return jsonify({"message": "No such queued leg"}), 400
+        removed = queue.pop(idx)
+        doc["queue"] = queue
+        with open(TRACKED_FILE, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        try:
+            os.chmod(TRACKED_FILE, 0o666)
+        except OSError:
+            pass
+        return jsonify({"message": f"{removed.get('callsign', '?')} removed.",
+                        "queue": queue})
+    except Exception as e:
+        return jsonify({"message": f"Error removing: {e}"}), 500
 
 
 @app.post("/route/search")

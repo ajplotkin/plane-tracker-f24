@@ -80,7 +80,7 @@ const doc = {
 };
 
 const posted = [];
-const responses = { lookup: null, legs: null };
+const responses = { lookup: null, legs: null, current: null, queue: [] };
 const sandbox = {
   document: doc,
   // Results are parsed from stdout, so anything the PAGE logs would be mixed
@@ -92,6 +92,8 @@ const sandbox = {
     posted.push({ url: u, body });
     if (u.includes("/tracked/lookup")) return { json: async () => responses.lookup };
     if (u.includes("/tracked/legs")) return { json: async () => responses.legs };
+    if (u.includes("/tracked/queue")) return { json: async () => ({ message: "ok", queue: responses.queue || [] }) };
+    if (u.includes("/tracked/json")) return { json: async () => (responses.current || { callsign: "", queue: [] }) };
     if (u.includes("/tracked/set")) return { json: async () => ({ message: "ok" }) };
     return { json: async () => ({}) };
   },
@@ -101,7 +103,8 @@ vm.createContext(sandbox);
 vm.runInContext(js, sandbox);
 
 const api = vm.runInContext(
-  "({lookupAndTrack, showLegs, pickLeg, loadOtherLegs, saveCallsign})", sandbox);
+  "({lookupAndTrack, lookupAndQueue, showLegs, showQueue, pickLeg, " +
+  "loadOtherLegs, saveCallsign, removeQueued})", sandbox);
 
 const setsOnly = () => posted.filter(p => p.url.includes("/tracked/set")).map(p => p.body);
 const reset = () => { posted.length = 0; doc.getElementById("callsign-input").value = ""; };
@@ -247,5 +250,55 @@ results.otherLegs_noneSaysSo =
   doc.getElementById("other-legs").textContent.includes("No other legs")
   && doc.getElementById("leg-picker").children
        .filter(c => c.className === "leg-btn").length === 0;
+
+// 11-13. Queueing a connection. Same lookup path as tracking, so the picker
+// and every other branch work for a queued leg too — only the endpoint differs.
+const queuedOnly = () => posted.filter(p => p.url.includes("/tracked/queue")
+                                         && !p.url.includes("remove")).map(p => p.body);
+reset();
+responses.lookup = { found: true, callsign: "UAL1714", summary: "UA1714 DEN→GJT",
+  origin: "DEN", destination: "GJT",
+  cached_route: { origin: "DEN", destination: "GJT" }, scheduled_departure: 7 };
+doc.getElementById("callsign-input").value = "UA1714";
+await api.lookupAndQueue();
+results.queue_wentToQueueEndpoint = queuedOnly().length === 1 && setsOnly().length === 0;
+results.queue_payload = queuedOnly()[0] || null;
+
+// Queue mode must not stick: the next plain Track has to track, not queue.
+reset();
+doc.getElementById("callsign-input").value = "UA1714";
+await api.lookupAndTrack();
+results.queue_modeDidNotStick = setsOnly().length === 1 && queuedOnly().length === 0;
+
+// A multi-leg lookup while queueing still shows the picker, and picking a leg
+// queues THAT leg rather than tracking it.
+reset();
+responses.lookup = { found: true, multiple: true, callsign: "UAL1714", summary: "2 legs",
+  flights: [
+    { callsign:"UAL1714", origin:"LGA", destination:"DEN",
+      cached_route:{origin:"LGA",destination:"DEN"}, scheduled_departure: 1 },
+    { callsign:"UAL1714", origin:"DEN", destination:"GJT",
+      cached_route:{origin:"DEN",destination:"GJT"}, scheduled_departure: 2 },
+  ]};
+doc.getElementById("callsign-input").value = "UA1714";
+await api.lookupAndQueue();
+const _qbtns = doc.getElementById("leg-picker").children.filter(c => c.className === "leg-btn");
+results.queue_pickerStillWorks = _qbtns.length === 2;
+
+// The queue is listed for the user, with what each leg is.
+reset();
+api.showQueue([
+  { callsign: "UAL1714", cached_route: { origin: "DEN", destination: "GJT" } },
+  { callsign: "UAL22", cached_route: { origin: "GJT", destination: "LAX" } },
+]);
+const _rows = doc.getElementById("queue-list").children.filter(c => c.className === "queue-item");
+results.queue_listed = _rows.length === 2
+  && _rows[0].textContent.includes("DEN") && _rows[0].textContent.includes("GJT");
+
+// Removing a queued leg asks the server for that position.
+_rows[1].children.filter(c => c.className === "queue-rm")[0].click();
+await new Promise(r => setTimeout(r, 50));
+results.queue_removeIndex = (posted.filter(p => p.url.includes("/tracked/queue/remove"))
+                                   .map(p => p.body && p.body.index)[0]);
 
 console.log(JSON.stringify(results, null, 2));

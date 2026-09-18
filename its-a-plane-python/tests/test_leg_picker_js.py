@@ -161,3 +161,35 @@ class TestTheOnDemandOtherLegsLink:
     def test_a_flight_with_no_continuation_says_so(self, harness):
         """Not an empty picker, and not silence."""
         assert harness["otherLegs_noneSaysSo"] is True
+
+
+class TestQueueingAConnection:
+    """Queue mode reuses the whole lookup path and changes only the endpoint,
+    so the picker and every other branch behave identically for a queued leg."""
+
+    def test_queueing_posts_to_the_queue_not_the_tracker(self, harness):
+        assert harness["queue_wentToQueueEndpoint"] is True
+
+    def test_a_queued_leg_carries_its_route_and_pin(self, harness):
+        """Same requirement as tracking: the callsign alone cannot say which
+        leg was meant, and a queued leg is resolved long before it runs."""
+        assert harness["queue_payload"] == {
+            "callsign": "UAL1714",
+            "cached_route": {"origin": "DEN", "destination": "GJT"},
+            "scheduled_departure": 7,
+        }
+
+    def test_queue_mode_does_not_stick(self, harness):
+        """The next plain Track must track. A latched mode would silently queue
+        flights the user meant to watch now."""
+        assert harness["queue_modeDidNotStick"] is True
+
+    def test_the_picker_still_appears_when_queueing(self, harness):
+        assert harness["queue_pickerStillWorks"] is True
+
+    def test_the_queue_is_shown_with_each_legs_route(self, harness):
+        assert harness["queue_listed"] is True
+
+    def test_removing_a_queued_leg_sends_its_position(self, harness):
+        """Position, not callsign — an itinerary can repeat a flight number."""
+        assert harness["queue_removeIndex"] == 1

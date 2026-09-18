@@ -1949,15 +1949,60 @@ class Overhead:
             return None
 
     def _do_auto_wipe(self):
-        """Wipe tracked_flight.json and reset all tracking state."""
+        """The tracked flight is over: advance to the next queued leg, or clear.
+
+        Every completion path funnels through here — the ETA-passed miss
+        counter, the no-ETA arrival check and tracked_completion_decision — so
+        this is the one place a queue has to be honoured.
+
+        Advancing on COMPLETION rather than on the clock is what makes a
+        connection safe. A queued leg is the next leg of one itinerary, so it
+        cannot begin until the current one ends; the two can never be wanted at
+        once no matter how far leg 1 runs late, and a delay simply postpones
+        the handover instead of racing it. A timer would have to guess.
+        """
+        next_leg = None
         try:
+            with open(TRACKED_FILE, "r", encoding="utf-8") as f:
+                _tf = json.load(f)
+            _queue = _tf.get("queue") or []
+            if _queue:
+                next_leg = _queue[0]
+                _rest = _queue[1:]
+        except (FileNotFoundError, json.JSONDecodeError, PermissionError, OSError):
+            pass
+
+        try:
+            if next_leg:
+                payload = {
+                    "callsign": (next_leg.get("callsign") or "").strip().upper(),
+                    "set_ts": int(time()),
+                    "queue": _rest,
+                }
+                # Only carry the pin and route if the queued leg actually has
+                # them; writing nulls would look like a deliberate blind track.
+                if next_leg.get("scheduled_departure"):
+                    payload["scheduled_departure"] = next_leg["scheduled_departure"]
+                if next_leg.get("cached_route"):
+                    payload["cached_route"] = next_leg["cached_route"]
+            else:
+                payload = {"callsign": "", "set_ts": 0}
+
             with open(TRACKED_FILE, "w", encoding="utf-8") as f:
-                json.dump({"callsign": "", "set_ts": 0}, f)
+                json.dump(payload, f)
             try:
                 os.chmod(TRACKED_FILE, 0o666)
             except OSError:
                 pass
-            logger.info("Tracked flight ended — auto-cleared.")
+            if next_leg:
+                logger.info(
+                    f"Tracked flight ended — advancing to queued leg "
+                    f"{payload['callsign']} "
+                    f"({(next_leg.get('cached_route') or {}).get('origin', '?')}→"
+                    f"{(next_leg.get('cached_route') or {}).get('destination', '?')}); "
+                    f"{len(_rest)} still queued.")
+            else:
+                logger.info("Tracked flight ended — auto-cleared.")
         except Exception as e:
             logger.error(f"Failed to auto-clear tracked flight: {e}")
         self._tracked_was_live = False
