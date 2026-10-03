@@ -584,8 +584,29 @@ rmdir ~/logo ~/logo2
 # 7. Install Python dependencies
 
 ```
-pip install pytz requests beautifulsoup4 FlightRadarAPI folium selenium pillow flask --break-system-packages
+pip install requests pillow flask folium python-dotenv ephem --break-system-packages
+pip install 'fr24[httpx]' h2 hpack --break-system-packages
 ```
+
+The second line is the flight data. Install it exactly as written — the
+`[httpx]` extra is not optional on a new install. fr24 0.4.0 (2026-09-06) made
+its HTTP transport optional: plain `pip install fr24` now installs cleanly and
+then fails at runtime with HTTP errors, because nothing is there to make the
+requests. Up to 0.3.1 httpx was a required dependency, which is why devices set
+up before September never hit this. (c0wsaysmoo ran into it on a fresh build.)
+
+On 0.3.1 the extra does not exist; pip prints a warning that fr24 "does not
+provide the extra 'httpx'" and installs normally, so the same line is safe
+either way. Verified against this code on both versions: the full test suite
+passes and live route lookups return flights.
+
+`h2` and `hpack` are listed separately because `utilities/fr24_client.py`
+imports them up front, before the process drops root, so they must be
+importable from the start.
+
+This list replaces an older one that named `FlightRadarAPI` — that library
+stopped working on 2026-04-30 and nothing here imports it — along with
+`pytz`, `beautifulsoup4` and `selenium`, which nothing imports either.
 If **Bookworm**
 ```
 sudo setcap 'cap_sys_nice=eip' /usr/bin/python3.11

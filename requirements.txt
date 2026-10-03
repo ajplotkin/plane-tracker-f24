@@ -1,9 +1,14 @@
-# FlightRadar24 official Python SDK
-fr24>=0.3.0
+# FR24 live feed — abc8747's UNOFFICIAL gRPC client (the official SDK is a
+# different package, fr24sdk). Since 0.4.0 its HTTP transport is an optional
+# extra, so a bare `fr24` installs cleanly and then fails every request.
+fr24[httpx]>=0.3.0
 
-# HTTP client (dependency of fr24, but listed explicitly)
+# HTTP/2 transport. Pulled in by the extra above, but listed explicitly because
+# utilities/fr24_client.py imports h2 and hpack itself, up front, before the
+# process drops root — they must be importable at start, not lazily.
 httpx[http2]
 h2>=4.0
+hpack
 
 # Environment variable management
 python-dotenv>=1.0.0
