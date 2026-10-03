@@ -279,22 +279,38 @@ def _file_sig(path):
         return None
 
 
+def _copy_records(data):
+    # Copy the entry dicts as well as the list. A shallow list copy is not
+    # enough: log_flight_data caches the flight's own `entry` dict, and
+    # log_farthest_flight is then handed that same dict and adds `reason`,
+    # `farthest_value` and `_airport` to it — which would silently change the
+    # cached closest list into something that is not on disk, and write those
+    # keys into close.txt on its next save. (Nested values such as trails are
+    # shared; nothing mutates those.)
+    return [dict(e) if isinstance(e, dict) else e for e in data]
+
+
 def _load_record_list(path):
     sig = _file_sig(path)
     hit = _record_cache.get(path)
     if hit is not None and sig is not None and hit[0] == sig:
-        return list(hit[1])                 # shallow copy: callers append/sort
+        return _copy_records(hit[1])
     data = safe_load_json(path)
     if sig is not None:
-        _record_cache[path] = (sig, list(data))
+        _record_cache[path] = (sig, _copy_records(data))
     return data
 
 
 def _write_record_list(path, data):
-    safe_write_json(path, data)
+    if not safe_write_json(path, data):
+        # Belt and braces: the write is atomic, so a failure leaves the file —
+        # and its (mtime, size) — unchanged, and the old cache entry would still
+        # match disk. Dropping it costs one re-read and assumes nothing.
+        _record_cache.pop(path, None)
+        return
     sig = _file_sig(path)
     if sig is not None:
-        _record_cache[path] = (sig, list(data))
+        _record_cache[path] = (sig, _copy_records(data))
     else:
         _record_cache.pop(path, None)
 
@@ -331,6 +347,12 @@ def _atomic_dump(path: str, data):
 
 
 def safe_write_json(path: str, data):
+    """Write JSON atomically. Returns True if the data reached disk.
+
+    A PermissionError is retried after a chmod and then logged rather than
+    raised; callers that must not treat an unwritten value as saved (the
+    flight counter, the counter migration) check the return value.
+    """
     try:
         _atomic_dump(path, data)
     except PermissionError:
@@ -345,7 +367,7 @@ def safe_write_json(path: str, data):
                 os.remove(f"{path}.tmp.{os.getpid()}")
             except OSError:
                 pass
-            return
+            return False
     # Best-effort: keep the file world-writable so the display (root/daemon)
     # and web (user) processes can both update it. chmod by a NON-OWNER
     # raises EPERM even when the write above succeeded — that must never be
@@ -354,6 +376,7 @@ def safe_write_json(path: str, data):
         os.chmod(path, 0o666)
     except OSError:
         pass
+    return True
 
 
 def ordinal(n: int):
@@ -587,7 +610,8 @@ def _adsbdb_aircraft(registration):
 # constant) so anything that points COUNTER_FILE somewhere else — tests do —
 # gets its own directory instead of writing into the real one.
 
-_counter_mem = {"path": None, "day": None, "doc": None, "seen": set()}
+_counter_mem = {"path": None, "day": None, "doc": None, "seen": set(),
+                "migrated": None}
 
 
 def _counter_dir():
@@ -598,9 +622,13 @@ def _migrate_legacy_counter():
     """Split the old single-file counter into per-day files, once.
 
     Idempotent and crash-safe: a day file that already exists is never
-    overwritten, and the old file is only renamed aside (to .migrated, kept as
-    a backup) after every day is written, so an interrupted run just resumes.
-    Readers merge both sources, so they see complete data mid-migration too.
+    overwritten, and the old file is renamed aside (to .migrated, kept as a
+    backup) only after EVERY day is confirmed on disk — a day whose write
+    failed leaves the old file in place, so nothing becomes invisible and the
+    next attempt resumes. Readers merge both sources, so they see complete
+    data mid-migration too. A legacy file that cannot be parsed is renamed to
+    .corrupt (kept, never deleted): left in place it would be re-parsed by
+    every reader for ever.
     """
     legacy = COUNTER_FILE
     if not os.path.exists(legacy):
@@ -608,16 +636,35 @@ def _migrate_legacy_counter():
     try:
         with open(legacy, "r", encoding="utf-8") as f:
             log = json.load(f)
-    except (OSError, ValueError):
+    except ValueError:
+        log = None
+    except OSError as e:
+        logger.warning(f"Flight counter: cannot read {legacy} to migrate it: {e}")
         return
     if not isinstance(log, dict):
+        try:
+            os.replace(legacy, legacy + ".corrupt")
+            logger.error(f"Flight counter: {legacy} is not a valid counter; "
+                         f"kept as {legacy}.corrupt and starting fresh")
+        except OSError as e:
+            logger.error(f"Flight counter: {legacy} is not a valid counter and "
+                         f"could not be set aside: {e}")
         return
     d = _counter_dir()
     os.makedirs(d, exist_ok=True)
+    missing = []
     for day, doc in log.items():
+        if not isinstance(doc, dict):
+            continue
         path = os.path.join(d, f"{day}.json")
-        if isinstance(doc, dict) and not os.path.exists(path):
+        if not os.path.exists(path):
             safe_write_json(path, doc)
+        if not os.path.exists(path):        # confirm on disk, not just "tried"
+            missing.append(day)
+    if missing:
+        logger.error(f"Flight counter: {len(missing)} day(s) could not be "
+                     f"written to {d}; keeping {legacy} so nothing is lost")
+        return
     try:
         os.replace(legacy, legacy + ".migrated")
         logger.info(f"Flight counter: split {len(log)} day(s) into {d}")
@@ -626,22 +673,41 @@ def _migrate_legacy_counter():
 
 
 def _prune_counter_days(d, today):
+    """Drop day files past STATS_LOG_DAYS, and orphaned temp files.
+
+    0 means keep everything. (The old single-file code treated 0 as a cutoff
+    of today and deleted every past day on the next write; config.html already
+    refuses anything under 7, so 0 is only reachable by hand, where "no limit"
+    is the reading that loses nothing.)
+    """
     try:
         from config import STATS_LOG_DAYS
     except (ImportError, NameError):
         STATS_LOG_DAYS = 90
-    if not STATS_LOG_DAYS or STATS_LOG_DAYS <= 0:
-        return
-    cutoff = str((datetime.now() - timedelta(days=STATS_LOG_DAYS)).date())
     try:
         names = os.listdir(d)
     except OSError:
         return
+    now_ts = time()
     for name in names:
+        full = os.path.join(d, name)
+        # _atomic_dump writes <day>.json.tmp.<pid> and renames it; a crash in
+        # between leaves the temp file behind. Harmless, but this directory
+        # lives for years, so sweep anything stale.
+        if ".json.tmp." in name:
+            try:
+                if now_ts - os.path.getmtime(full) > 3600:
+                    os.remove(full)
+            except OSError:
+                pass
+            continue
+        if not STATS_LOG_DAYS or STATS_LOG_DAYS <= 0:
+            continue
+        cutoff = str((datetime.now() - timedelta(days=STATS_LOG_DAYS)).date())
         day = name[:-5] if name.endswith(".json") else None
         if day and day < cutoff and day != today:
             try:
-                os.remove(os.path.join(d, name))
+                os.remove(full)
             except OSError:
                 pass
 
@@ -649,8 +715,8 @@ def _prune_counter_days(d, today):
 def load_counter_log():
     """Every day's counter, as the date-keyed dict the old single file held.
 
-    Merges a not-yet-migrated legacy file with the per-day files (the day
-    files win), so it is correct before, during and after migration.
+    Merges a not-yet-migrated legacy file with the per-day files — the day
+    files win — so it is correct before, during and after migration.
     """
     log = {}
     try:
@@ -685,7 +751,7 @@ def log_flight_count(callsign, entry=None):
         return
     if entry is None:
         entry = {}
-    now = datetime.now()
+    now = datetime.now()     # once: the file, the doc and mem["day"] must agree
     today = str(now.date())
     now_str = now.strftime("%H:%M:%S")
     d = _counter_dir()
@@ -694,7 +760,17 @@ def log_flight_count(callsign, entry=None):
     if mem["path"] != d or mem["day"] != today:
         # First call, a new day, or a different counter location: (re)load
         # TODAY's file only — small, and once per day rather than per flight.
-        _migrate_legacy_counter()
+        #
+        # The migration is attempted once per counter location, whatever
+        # happens. If it raised and were retried on every call, a persistent
+        # failure would re-parse the whole 6 MB legacy file per flight per
+        # cycle — the exact freeze this design removes.
+        if mem["migrated"] != d:
+            mem["migrated"] = d
+            try:
+                _migrate_legacy_counter()
+            except Exception as e:
+                logger.error(f"Flight counter: migration failed: {e}")
         doc = None
         try:
             with open(os.path.join(d, f"{today}.json"), "r", encoding="utf-8") as f:
@@ -706,25 +782,34 @@ def log_flight_count(callsign, entry=None):
                    "first_seen": now_str, "last_seen": now_str}
         mem.update(path=d, day=today, doc=doc,
                    seen={e.get("callsign") for e in doc["flights"]})
-        _prune_counter_days(d, today)
+        try:
+            _prune_counter_days(d, today)
+        except Exception as e:
+            logger.warning(f"Flight counter: pruning failed: {e}")
 
     if callsign in mem["seen"]:
         return      # the common case — no file I/O at all
 
+    # Build the new day and commit it to memory only once it is on disk. If
+    # memory went first, a failed write would leave the flight marked as seen,
+    # so it would never be retried — and a restart before the next new flight
+    # would lose it.
     doc = mem["doc"]
-    doc["flights"].append({
+    candidate = dict(doc)
+    candidate["flights"] = doc["flights"] + [{
         "callsign": callsign,
         "time": now_str,
         "hour": now.hour,
         "origin": entry.get("origin", ""),
         "dest": entry.get("destination", ""),
         "aircraft": entry.get("plane", ""),
-    })
-    doc["count"] = len(doc["flights"])
-    doc["last_seen"] = now_str
-    mem["seen"].add(callsign)
+    }]
+    candidate["count"] = len(candidate["flights"])
+    candidate["last_seen"] = now_str
     os.makedirs(d, exist_ok=True)
-    safe_write_json(os.path.join(d, f"{today}.json"), doc)
+    if safe_write_json(os.path.join(d, f"{today}.json"), candidate):
+        mem["doc"] = candidate
+        mem["seen"].add(callsign)
 
 
 def load_tracked_callsign():

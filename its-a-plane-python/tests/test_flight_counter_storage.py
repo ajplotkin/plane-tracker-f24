@@ -40,9 +40,9 @@ def _day(n_ago):
 def counter(tmp_path, monkeypatch):
     path = str(tmp_path / "flight_counter.json")
     monkeypatch.setattr(oh, "COUNTER_FILE", path)
-    oh._counter_mem.update(path=None, day=None, doc=None, seen=set())
+    oh._counter_mem.update(path=None, day=None, doc=None, seen=set(), migrated=None)
     yield path
-    oh._counter_mem.update(path=None, day=None, doc=None, seen=set())
+    oh._counter_mem.update(path=None, day=None, doc=None, seen=set(), migrated=None)
 
 
 def _opens(fn):
@@ -86,7 +86,7 @@ class TestCorrectnessIsUnchanged:
 
     def test_a_restart_still_deduplicates_against_today(self, counter):
         oh.log_flight_count("UAL1", {"origin": "EWR"})
-        oh._counter_mem.update(path=None, day=None, doc=None, seen=set())  # restart
+        oh._counter_mem.update(path=None, day=None, doc=None, seen=set(), migrated=None)  # restart
         oh.log_flight_count("UAL1", {"origin": "EWR"})
         assert oh.load_counter_log()[TODAY]["count"] == 1
 
@@ -98,11 +98,6 @@ class TestCorrectnessIsUnchanged:
         assert (f["callsign"], f["origin"], f["dest"], f["aircraft"]) == \
                ("UAL1", "EWR", "LAX", "B738")
 
-    def test_a_new_day_starts_a_new_file(self, counter):
-        oh.log_flight_count("UAL1", {})
-        oh._counter_mem["day"] = "1999-01-01"      # as if yesterday's state were held
-        oh.log_flight_count("UAL1", {})            # same callsign, new day file
-        assert oh.load_counter_log()[TODAY]["count"] == 1
 
 
 class TestMigrationFromTheSingleFile:
@@ -212,3 +207,180 @@ class TestClosestAndFarthestAreNotReparsedEveryCycle:
         lst.append({"callsign": "UNSAVED", "distance": 0.1})
         lst.sort(key=lambda e: e["distance"])
         assert [e["callsign"] for e in oh._load_record_list(rec)] == ["A"]
+
+
+
+class _Clock:
+    """Stand-in for overhead.datetime whose now() can be moved."""
+
+    def __init__(self, when):
+        self.when = when
+
+    def now(self):
+        return self.when
+
+
+class TestMidnight:
+    """The old test for this set the in-memory day by hand and logged a flight
+    already counted — it passed with the rollover code deleted. This one moves
+    the clock across midnight with the same callsign either side."""
+
+    def test_the_same_flight_counts_again_on_the_new_day(self, counter):
+        clock = _Clock(datetime(2026, 10, 3, 23, 59, 59))
+        with patch.object(oh, "datetime", clock):
+            oh.log_flight_count("UAL1", {})
+            oh.log_flight_count("DAL2", {})
+            clock.when = datetime(2026, 10, 4, 0, 0, 0)
+            oh.log_flight_count("UAL1", {})
+        log = oh.load_counter_log()
+        assert log["2026-10-03"]["count"] == 2
+        assert log["2026-10-04"]["count"] == 1, "UAL1 was treated as seen on the new day"
+        assert log["2026-10-04"]["date"] == "2026-10-04"
+        assert log["2026-10-04"]["first_seen"] == "00:00:00"
+
+    def test_yesterday_is_not_written_into_todays_file(self, counter):
+        clock = _Clock(datetime(2026, 10, 3, 23, 59, 59))
+        with patch.object(oh, "datetime", clock):
+            oh.log_flight_count("UAL1", {})
+            clock.when = datetime(2026, 10, 4, 0, 0, 1)
+            oh.log_flight_count("BAW3", {})
+        log = oh.load_counter_log()
+        assert [f["callsign"] for f in log["2026-10-04"]["flights"]] == ["BAW3"]
+        assert [f["callsign"] for f in log["2026-10-03"]["flights"]] == ["UAL1"]
+
+
+class TestWhenAWriteFails:
+
+    def test_a_flight_whose_write_failed_is_retried(self, counter):
+        """Marking it seen before the write meant it was never retried, and a
+        restart before the next new flight lost it for good."""
+        with patch.object(oh, "safe_write_json", return_value=False):
+            oh.log_flight_count("UAL1", {})
+        oh.log_flight_count("UAL1", {})                 # writer healthy again
+        assert oh.load_counter_log()[TODAY]["count"] == 1
+
+    def test_a_failed_write_leaves_memory_unchanged(self, counter):
+        oh.log_flight_count("UAL1", {})
+        with patch.object(oh, "safe_write_json", return_value=False):
+            oh.log_flight_count("DAL2", {})
+        assert "DAL2" not in oh._counter_mem["seen"]
+        assert oh._counter_mem["doc"]["count"] == 1
+
+    def test_migration_keeps_the_old_file_if_a_day_could_not_be_written(self, counter):
+        """The rename used to happen regardless, so a permissions problem left
+        the history invisible (in .migrated) and counting stopped."""
+        with open(counter, "w") as f:
+            json.dump({_day(1): {"date": _day(1), "count": 1, "flights": []}}, f)
+        with patch.object(oh, "safe_write_json", return_value=False):
+            oh._migrate_legacy_counter()
+        assert os.path.exists(counter), "history was retired though nothing was written"
+        assert not os.path.exists(counter + ".migrated")
+        assert oh.load_counter_log()[_day(1)]["count"] == 1
+
+    def test_a_migration_that_raises_is_not_retried_on_every_flight(self, counter):
+        """A retry per call would re-parse the whole legacy file per flight per
+        cycle — the freeze this design exists to remove."""
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise OSError("read-only file system")
+        with patch.object(oh, "_migrate_legacy_counter", boom):
+            for cs in ("A1", "B2", "C3", "A1"):
+                oh.log_flight_count(cs, {})
+        assert len(calls) == 1, f"migration attempted {len(calls)} times"
+        assert oh.load_counter_log()[TODAY]["count"] == 3
+
+    def test_a_failing_migration_is_not_retried_at_every_midnight_either(self, counter):
+        """Each attempt parses the whole legacy file; a persistent failure
+        should cost that once per process, not once per day."""
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise OSError("read-only file system")
+        clock = _Clock(datetime(2026, 10, 3, 23, 0, 0))
+        with patch.object(oh, "_migrate_legacy_counter", boom), \
+             patch.object(oh, "datetime", clock):
+            oh.log_flight_count("A1", {})
+            clock.when = datetime(2026, 10, 4, 0, 30, 0)
+            oh.log_flight_count("A1", {})
+            clock.when = datetime(2026, 10, 5, 0, 30, 0)
+            oh.log_flight_count("A1", {})
+        assert len(calls) == 1, f"migration attempted {len(calls)} times over 3 days"
+
+
+class TestLegacyEdgeCases:
+
+    def test_a_corrupt_legacy_file_is_set_aside_not_reparsed_forever(self, counter):
+        with open(counter, "w") as f:
+            f.write("{truncated by a power cut")
+        oh.log_flight_count("UAL1", {})
+        assert not os.path.exists(counter)
+        assert os.path.exists(counter + ".corrupt"), "the damaged file was deleted"
+        assert oh.load_counter_log()[TODAY]["count"] == 1
+
+    def test_day_files_win_over_an_unmigrated_legacy_copy(self, counter):
+        with open(counter, "w") as f:
+            json.dump({_day(1): {"date": _day(1), "count": 1, "flights": []}}, f)
+        d = oh._counter_dir()
+        os.makedirs(d)
+        with open(os.path.join(d, f"{_day(1)}.json"), "w") as f:
+            json.dump({"date": _day(1), "count": 5, "flights": []}, f)
+        assert oh.load_counter_log()[_day(1)]["count"] == 5
+
+
+class TestRetentionEdges:
+
+    @pytest.mark.parametrize("days", [0, -5, None])
+    def test_no_positive_limit_means_keep_everything(self, counter, days):
+        """A negative limit would put the cutoff in the FUTURE and delete every
+        past day — the guard has to catch it, not only 0."""
+        d = oh._counter_dir()
+        os.makedirs(d)
+        with open(os.path.join(d, f"{_day(400)}.json"), "w") as f:
+            json.dump({"date": _day(400), "count": 0, "flights": []}, f)
+        with patch.dict(sys.modules["config"].__dict__, {"STATS_LOG_DAYS": days}):
+            oh.log_flight_count("UAL1", {})
+        assert _day(400) in oh.load_counter_log(), f"{days!r} deleted history"
+
+    def test_stale_temp_files_are_swept(self, counter):
+        d = oh._counter_dir()
+        os.makedirs(d)
+        stale = os.path.join(d, f"{_day(1)}.json.tmp.4242")
+        fresh = os.path.join(d, f"{TODAY}.json.tmp.4243")
+        for p in (stale, fresh):
+            with open(p, "w") as f:
+                f.write("{}")
+        old = __import__("time").time() - 7200
+        os.utime(stale, (old, old))
+        oh.log_flight_count("UAL1", {})
+        assert not os.path.exists(stale), "an orphaned temp file was kept"
+        assert os.path.exists(fresh), "a temp file possibly mid-write was removed"
+
+
+class TestCachedEntriesAreNotTheCallersDicts:
+
+    def test_mutating_an_entry_after_writing_does_not_change_the_cache(self, tmp_path):
+        """log_farthest_flight adds keys to the same entry dict log_flight_data
+        just cached; those keys must not appear in the cached closest list."""
+        oh._record_cache.clear()
+        p = str(tmp_path / "close.txt")
+        entry = {"callsign": "UAL1", "distance": 1.0}
+        oh._write_record_list(p, [entry])
+        entry["_airport"] = "LHR"
+        entry["reason"] = "origin"
+        cached = oh._load_record_list(p)
+        assert cached == [{"callsign": "UAL1", "distance": 1.0}], cached
+        with open(p) as f:
+            assert json.load(f) == cached, "cache and disk disagree"
+        oh._record_cache.clear()
+
+    def test_a_failed_write_is_not_cached_as_if_it_landed(self, tmp_path):
+        oh._record_cache.clear()
+        p = str(tmp_path / "close.txt")
+        oh._write_record_list(p, [{"callsign": "A"}])
+        with patch.object(oh, "safe_write_json", return_value=False):
+            oh._write_record_list(p, [{"callsign": "NEVER_SAVED"}])
+        assert oh._load_record_list(p) == [{"callsign": "A"}]
+        oh._record_cache.clear()

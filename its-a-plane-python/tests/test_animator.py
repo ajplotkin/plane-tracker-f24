@@ -5,6 +5,7 @@ than calling it — so these drive the real play() under a fake clock.
 """
 
 import logging
+import re
 from unittest.mock import patch
 
 import pytest
@@ -247,3 +248,57 @@ def test_the_report_names_the_slow_keyframe(caplog):
             s.play()
     msgs = [r.message for r in caplog.records if "deadline" in r.message]
     assert msgs and "slowest keyframe heavy_redraw 250 ms" in msgs[0], msgs
+
+
+def _play_one_slow(caplog, slow_frame_fn):
+    caplog.set_level(logging.INFO, logger=anim.__name__)
+    clock = _Clock()
+
+    class Scene(Animator):
+        @Animator.KeyFrame.add(1)
+        def flaky_fetch(self, count):
+            slow_frame_fn(self, clock)
+            if self.frame >= 15 * 65:
+                raise _Stop
+
+    with patch.object(anim, "monotonic", clock.monotonic), \
+         patch.object(anim, "sleep", clock.sleep), \
+         patch.object(anim, "_log", logging.getLogger(anim.__name__)):
+        s = Scene(); s.delay = 1 / 15
+        with pytest.raises(_Stop):
+            s.play()
+    return [r.message for r in caplog.records if "deadline" in r.message]
+
+
+def test_a_keyframe_that_raises_after_slow_work_is_still_named(caplog):
+    """A fetch that hangs and then times out is the case most worth naming."""
+    def f(self, clock):
+        clock.t += 0.001
+        if self.frame == 40:
+            clock.t += 0.250
+            raise TimeoutError("fetch timed out")
+    msgs = _play_one_slow(caplog, f)
+    assert msgs and "slowest keyframe flaky_fetch 25" in msgs[0], msgs
+
+
+def test_a_work_only_stall_still_gets_a_timestamp(caplog):
+    """The time used to be recorded only for late starts, so a pure-work
+    stall reported 'at -' — the one you most need to find in the journal."""
+    def f(self, clock):
+        clock.t += 0.250 if self.frame == 40 else 0.001
+    msgs = _play_one_slow(caplog, f)
+    assert msgs and "worst frame at -" not in msgs[0], msgs
+    assert re.search(r"worst frame at \d\d:\d\d:\d\d", msgs[0]), msgs
+
+
+def test_reloading_the_module_does_not_double_register_the_gc_callback():
+    import gc
+    import importlib
+    try:
+        importlib.reload(anim)
+        mine = [cb for cb in gc.callbacks
+                if getattr(cb, "__qualname__", "") == "_gc_callback"
+                and getattr(cb, "__module__", "") == anim.__name__]
+        assert len(mine) == 1, f"{len(mine)} callbacks after a reload"
+    finally:
+        importlib.reload(anim)

@@ -27,8 +27,13 @@ def _gc_callback(phase, info):
             _gc_stats["worst_gen"] = info.get("generation", -1)
 
 
-if _gc_callback not in gc.callbacks:
-    gc.callbacks.append(_gc_callback)
+# Replace any copy registered by an earlier import of this module. Comparing by
+# identity is not enough: importlib.reload makes a new function object, and a
+# second callback would double-count every slow collection.
+gc.callbacks[:] = [cb for cb in gc.callbacks
+                   if getattr(cb, "__qualname__", None) != "_gc_callback"
+                   or getattr(cb, "__module__", None) != __name__]
+gc.callbacks.append(_gc_callback)
 
 DELAY_DEFAULT = 0.01
 
@@ -66,6 +71,7 @@ class Animator(object):
         # Frame-budget telemetry, reset every minute; see play().
         self._frame_budget = {"n": 0, "over": 0, "worst_work": 0.0,
                               "worst_wake": 0.0, "worst_at": 0.0,
+                              "worst_total": 0.0,
                               "worst_kf": "", "worst_kf_t": 0.0,
                               "t": monotonic()}
 
@@ -119,12 +125,6 @@ class Animator(object):
                             keyframe.properties["count"] = 0
                         else:
                             keyframe.properties["count"] += 1
-                    # Which keyframe made a slow frame slow. Without this, the
-                    # telemetry could say a frame did 250 ms of work but not
-                    # whose work it was.
-                    _kf_d = monotonic() - _kf_t0
-                    if _kf_d > _slow_kf_t:
-                        _slow_kf, _slow_kf_t = keyframe, _kf_d
                 except Exception:
                     _name = getattr(keyframe, "__name__", repr(keyframe))
                     _errs = self.__dict__.setdefault("_keyframe_err_ts", {})
@@ -133,6 +133,14 @@ class Animator(object):
                         _errs[_name] = _t
                         _log.exception(
                             "Animator: keyframe %s raised (continuing)", _name)
+                finally:
+                    # Which keyframe made a slow frame slow. In a finally so a
+                    # keyframe that does 250 ms of work and THEN raises — a
+                    # fetch that hangs until it times out — is still named;
+                    # that is the case most worth naming.
+                    _kf_d = monotonic() - _kf_t0
+                    if _kf_d > _slow_kf_t:
+                        _slow_kf, _slow_kf_t = keyframe, _kf_d
 
             self.frame += 1
             next_frame += self._delay
@@ -157,13 +165,15 @@ class Animator(object):
             if _work + _wake > self._delay:
                 _fb["over"] += 1
                 _fb["worst_work"] = max(_fb["worst_work"], _work)
+                _fb["worst_wake"] = max(_fb["worst_wake"], _wake)
                 if _slow_kf is not None and _slow_kf_t > _fb["worst_kf_t"]:
                     _fb["worst_kf_t"] = _slow_kf_t
                     _fb["worst_kf"] = getattr(_slow_kf, "__name__", "?")
-                if _wake > _fb["worst_wake"]:
-                    _fb["worst_wake"] = _wake
-                    # Wall-clock time of the worst stall, so it can be lined up
-                    # against the journal (FR24 polls, fetches, restarts).
+                if _work + _wake > _fb["worst_total"]:
+                    # Wall-clock time of the worst missed frame — by how late
+                    # it finished, whether from slow work or a late start — so
+                    # it can be lined up against the journal.
+                    _fb["worst_total"] = _work + _wake
                     _fb["worst_at"] = time()
             if now - _fb["t"] >= 60:
                 if _fb["over"]:
@@ -181,12 +191,13 @@ class Animator(object):
                     _log.info(
                         "Animator: %d/%d frames missed the %.0f ms deadline in "
                         "the last minute (worst work %.0f ms, worst late start "
-                        "%.0f ms at %s%s%s)",
+                        "%.0f ms, worst frame at %s%s%s)",
                         _fb["over"], _fb["n"], self._delay * 1000,
                         _fb["worst_work"] * 1000, _fb["worst_wake"] * 1000,
                         _at, _kf, _gcs)
                 _fb.update(n=0, over=0, worst_work=0.0, worst_wake=0.0,
-                           worst_at=0.0, worst_kf="", worst_kf_t=0.0, t=now)
+                           worst_at=0.0, worst_total=0.0, worst_kf="",
+                           worst_kf_t=0.0, t=now)
                 _gc_stats.update(slow=0, worst=0.0, worst_gen=-1)
 
             if next_frame < now:
