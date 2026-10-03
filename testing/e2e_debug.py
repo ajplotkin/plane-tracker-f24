@@ -8,6 +8,19 @@ writes into the page-indicator zone must occur ONLY when the page changes.
 Usage: python e2e_debug.py <workdir> <scenario>
   scenario: multi | single | reset | iss
 """
+# The tracked scenario asserts on panel-local times, and utilities.airlabs
+# resolves them with datetime.fromtimestamp(), which reads the HOST's zone. The
+# fleet is America/New_York; without pinning it here the scenario passes only on
+# an Eastern-time machine and fails under TZ=UTC for reasons that have nothing
+# to do with the code under test.
+import os as _os_tz
+_os_tz.environ["TZ"] = "America/New_York"
+try:
+    import time as _time_tz
+    _time_tz.tzset()
+except AttributeError:          # not POSIX
+    pass
+
 import os
 import sys
 import traceback
@@ -49,14 +62,23 @@ RECORDER = fake_rgbmatrix.RECORDER
 # reads advances one frame period per replayed frame, exactly as it does on the
 # device. 1500 frames == 150 virtual seconds, so every wall-clock cycle shorter
 # than the scenario is exercised — both blink faces, always. The base is floored
-# to an even second so frame 0 starts in phase 0, making runs reproducible
-# rather than merely non-flaky, and it tracks the real date so cache TTLs and
-# datetime.now() (not patched — it does not read time.time()) stay consistent.
+# to a multiple of FOUR seconds so frame 0 starts in phase 0, making runs
+# reproducible rather than merely non-flaky, and it tracks the real date so cache
+# TTLs and datetime.now() (not patched — it does not read time.time()) stay
+# consistent.
+#
+# Four, not two. The phase is int(t//2)%2, so phase 0 needs floor(t/2) to be
+# EVEN, i.e. t in [4k, 4k+2). Flooring to an even second only aligns the
+# boundary; the parity still flips every 2 s of start time, so "frame 0 is phase
+# 0" held on exactly half of runs. Nothing caught it because no assertion
+# depended on WHICH face was up — but issfull dumps canvas snapshots for
+# pixel-diffing two code versions, and the indicator zone came out inverted
+# between runs of identical code roughly half the time.
 import time as _time_module  # noqa: E402
-from setup import frames as _frames  # noqa: E402 (setup/frames.py: PERIOD = 0.1)
+from setup import frames as _frames  # noqa: E402 (frame rate comes from setup/frames.py)
 
 VCLOCK = {"frame": 0}  # run_frames() keeps this in step with Animator.frame
-_VCLOCK_BASE = (int(_time_module.time()) // 2) * 2.0
+_VCLOCK_BASE = (int(_time_module.time()) // 4) * 4.0
 
 
 def virtual_time():
@@ -236,8 +258,11 @@ if SCENARIO in ("multi", "old"):
 
     run_frames(d, 1200, hook)
 
-    # data becomes active at frame 50 (check_for_loaded_data divisor)
-    DATA_ACTIVE = 50
+    # data becomes active at the first check_for_loaded_data keyframe, which
+    # runs every 5 s. Was a literal 50 — right only at 10 fps, and at 15 fps it
+    # started checking 25 frames before the data was even live, passing only
+    # because nothing happened to be written in that window.
+    DATA_ACTIVE = int(_frames.PER_SECOND * 5)
     reset_frames = set(RECORDER.clears)
     for f in range(DATA_ACTIVE, 1200):
         w = RECORDER.zone_writes(f, IND_X0, IND_X1, IND_Y0, IND_Y1)
@@ -396,6 +421,205 @@ elif SCENARIO == "issfull":
         check("takeover ends with scene reset (draw-once scenes recover)",
               any(f >= 250 for f in RECORDER.clears), str(RECORDER.clears[-3:]))
 
+elif SCENARIO == "tracked":
+    # Tracked-flight page: no zone flights, so _data stays empty and the two
+    # tracked lines own the screen. Both must scroll on ONE shared position and
+    # wrap TOGETHER on the wider line. They used to own a position each and wrap
+    # at their own widths, so the shorter line lapped the longer one and the two
+    # visibly started and stopped at different moments.
+    # Real AirLabs figures for UA2017 on 2026-08-21: leaves SEA 44 late but makes
+    # up time, arriving EWR only 22 late. Deliberately a flight whose DEPARTURE
+    # is in another zone and whose ARRIVAL is in the panel's own, so the line
+    # exercises both the converted and the suppressed case at once.
+    TRACKED = {"callsign": "UAL2017", "number": "UAL2017",
+               "airline_name": "United", "origin": "SEA", "destination": "EWR",
+               "is_scheduled": True,
+               "dep_time": "2026-08-20 22:58", "dep_time_ts": 1787291880,
+               "dep_time_revised": "2026-08-20 23:42",
+               "dep_time_revised_ts": 1787294520, "dep_delay_min": 44,
+               # As utilities.airlabs.local_wall would resolve them: the SEA
+               # departure converts (and crosses midnight here), the EWR arrival
+               # does not, because EWR is already on the panel's clock.
+               "dep_time_revised_local": "2026-08-21 02:42",
+               "dep_time_revised_local_tz": "EDT",
+               "dep_time_revised_local_day": "+1",
+               "arr_time": "2026-08-21 07:10", "arr_time_ts": 1787310600,
+               "arr_time_revised": "2026-08-21 07:32",
+               "arr_time_revised_ts": 1787311920, "arr_delay_min": 22,
+               "arr_time_revised_local": None,
+               "arr_time_revised_local_tz": "",
+               "arr_time_revised_local_day": ""}
+
+    def hook(d):
+        d.overhead.tracked_data = TRACKED
+
+    run_frames(d, 900, hook)
+
+    ROUTE_Y0, ROUTE_Y1 = 19 - 8 + 1, 19      # LINE1_Y - LOGO_SIZE + 1 .. LINE1_Y
+    STATS_Y0, STATS_Y1 = 31 - 6, 31          # LINE3_Y - 6 .. LINE3_Y
+
+    def leftmost(frame, y0, y1):
+        """Smallest x of a non-black write in a row band, or None."""
+        xs = [w[0] for w in RECORDER.zone_writes(frame, 0, 64, y0, y1)
+              if w[2] != (0, 0, 0)]
+        return min(xs) if xs else None
+
+    route, stats = {}, {}
+    for f in range(60, 900):
+        r = leftmost(f, ROUTE_Y0, ROUTE_Y1)
+        t_ = leftmost(f, STATS_Y0, STATS_Y1)
+        if r is not None:
+            route[f] = r
+        if t_ is not None:
+            stats[f] = t_
+    # Not "every frame": the lines share one position and wrap on the WIDEST, so
+    # the shorter line scrolls off and waits blank until the longer one finishes
+    # — the same trade the main page makes. What matters is that both draw for a
+    # substantial stretch and neither is permanently absent.
+    check("both tracked lines draw", len(route) > 300 and len(stats) > 300,
+          f"route {len(route)} frames, stats {len(stats)} frames")
+    print(f"INFO  line-1 on screen {100*len(route)//max(len(stats),1)}% as long as line 3 "
+          f"(route {len(route)}f, stats {len(stats)}f) — the shorter line waits")
+
+    # A wrap shows up as the leftmost x jumping back toward the right edge.
+    def wraps(series):
+        ks = sorted(series)
+        return [b for a, b in zip(ks, ks[1:]) if series[b] - series[a] > 20]
+
+    rw, sw = wraps(route), wraps(stats)
+    check("tracked lines wrap on the SAME frames (one shared position)",
+          rw == sw and len(rw) >= 1, f"route wraps {rw[:6]}, stats wraps {sw[:6]}")
+
+    # Only one position may exist: a scene keeping its own would drift again.
+    check("no per-scene tracked scroll position survives",
+          not hasattr(d, "_tr_pos") and not hasattr(d, "_ts_pos"),
+          f"_tr_pos={hasattr(d, '_tr_pos')} _ts_pos={hasattr(d, '_ts_pos')}")
+    check("both lines report a width to the shared driver",
+          set(d._tracked_widths) == {"tracked_route", "tracked_stats"},
+          f"reported: {sorted(d._tracked_widths)}")
+
+    # The cycle must be the WIDER line's, not each line's own.
+    if rw and len(rw) >= 2:
+        cycle = rw[1] - rw[0]
+        expected = 64 + max(d._tracked_widths.values()) + 1
+        # Exact, not approximate: the cycle is fully determined (WIDTH + max
+        # width + 1), and a +-2 tolerance let an off-by-one wrap condition
+        # (`< 0` -> `<= 0`) through.
+        check("cycle length follows the widest line",
+              cycle == expected, f"cycle {cycle}px vs expected {expected}px")
+
+    # The route is drawn once, on line 1 by trackedroute.py — not repeated in
+    # the stats line. (journey.py is the ZONE-flight route line and returns when
+    # len(self._data) == 0, so it never draws on this page at all.)
+    from scenes.trackedstats import _build_stats
+    stats_text = "".join(ch for ch, _ in _build_stats(TRACKED))
+    # The codes were dropped from this line entirely (line 1 already shows the
+    # route), so neither the codes nor the arrow-joined pair may appear here.
+    check("stats line does not repeat the origin-destination pair",
+          "SEA\u2192EWR" not in stats_text and "SEA \u2192 EWR" not in stats_text,
+          repr(stats_text))
+    check("airport codes stay on line 1, not repeated in the stats line",
+          "SEA" not in stats_text and "EWR" not in stats_text, repr(stats_text))
+    check("the panel-local conversion is present and labelled",
+          "EDT" in stats_text or "EST" in stats_text, repr(stats_text))
+
+    # The width the draw loop ACCUMULATED, against one computed independently.
+    # Dropping fonts.kern_5x8 at either call site, or flipping its sign, passed
+    # every unit test — the only kern tests called the table directly, so the
+    # call sites themselves were unpinned. This is the check that catches it,
+    # and it also guards the width that drives the shared scroll and the epoch.
+    from setup.fonts import kern_5x8
+    want_stats = sum(5 + kern_5x8(c) for c in stats_text)
+    check("the stats line's reported width includes the kern",
+          d._tracked_widths.get("tracked_stats") == want_stats,
+          f"reported {d._tracked_widths.get('tracked_stats')}, "
+          f"expected {want_stats} (unkerned would be {len(stats_text) * 5})")
+
+    # Same for line 1, whose text is deterministic from the fixture. Its width
+    # also carries the logo and the gap before the text starts.
+    route_text = "United 2017 SEA \u2192 EWR"
+    want_route = 8 + 2 + sum(5 + kern_5x8(c) for c in route_text)   # LOGO_SIZE + LOGO_GAP
+    check("the route line's reported width includes the kern",
+          d._tracked_widths.get("tracked_route") == want_route,
+          f"reported {d._tracked_widths.get('tracked_route')}, expected {want_route}")
+
+    # ---- a NEW tracked flight must RESTART the shared scroll --------------
+    # Deleting the reset block from advance_tracked_scroll passed all 598 unit
+    # tests and all nine scenarios: nothing anywhere swapped the tracked flight.
+    # Without it the new flight inherits the old one's mid-scroll position and
+    # starts part-way through.
+    TRACKED2 = dict(TRACKED, callsign="DAL0009", number="DAL0009",
+                    airline_name="Delta", origin="BOS", destination="LAX")
+    # Park the scroll SAFELY mid-cycle first, then swap the flight. "ends at 64"
+    # is satisfiable by accident in two different ways, and the first two
+    # versions of this check hit both: a plain decrement from 65 lands on 64,
+    # and starting one frame before the natural wrap (pos == -max_width) also
+    # lands on 64 without any reset happening. The window below is past the
+    # screen edge but far from the wrap point, so ONLY a reset can produce 64.
+    wrap_at = -max(d._tracked_widths.values())        # pos where the cycle ends
+    lo, hi = wrap_at + 40, -20                        # comfortably inside
+    guard = 0
+    while not (lo <= d._tracked_scroll_pos <= hi) and guard < 600:
+        run_frames(d, 1, lambda dd: setattr(dd.overhead, "tracked_data", TRACKED))
+        guard += 1
+    pos_before = d._tracked_scroll_pos
+    run_frames(d, 1, lambda dd: setattr(dd.overhead, "tracked_data", TRACKED2))
+    check("a new tracked flight restarts the shared scroll",
+          lo <= pos_before <= hi and d._tracked_scroll_pos == 64,
+          f"pos {pos_before} -> {d._tracked_scroll_pos} "
+          f"(parked in [{lo},{hi}]; only a reset can reach 64 from there)")
+
+    # ---- ISS takeover must FREEZE the tracked scroll ----------------------
+    # Removing the _iss_active guard also passed everything. The lines are not
+    # drawn during a takeover, so advancing churns the position invisibly and
+    # can fire a wrap (and an epoch write) against a clock nobody is watching.
+    run_frames(d, 30, lambda dd: setattr(dd.overhead, "tracked_data", TRACKED2))
+    ISS_ON = {"is_active": True, "progress": 0.5, "time_remaining_sec": 60,
+              "rise_compass": "NW", "set_compass": "SE", "max_elevation": 70}
+
+    def iss_hook(dd):
+        dd.overhead.tracked_data = TRACKED2
+        dd.overhead.iss_pass_data = ISS_ON
+
+    run_frames(d, 5, iss_hook)          # let the takeover engage
+    frozen_at = d._tracked_scroll_pos
+    run_frames(d, 40, iss_hook)
+    check("ISS takeover freezes the tracked scroll",
+          d._tracked_scroll_pos == frozen_at,
+          f"advanced {frozen_at} -> {d._tracked_scroll_pos} during takeover")
+
+    # ---- the wrap must write the epoch the mirror reads -------------------
+    # Removing the _write_tracked_epoch call passed everything too: the whole
+    # mirror-sync path was untested, which is the same blind spot that let the
+    # stale-filename bug in overhead.py survive.
+    # NB: the harness chdir()s into WORK, which is the REAL app tree when one is
+    # passed on the command line. So this must not delete anything there — it
+    # notes the virtual time first and asserts the epoch was written DURING this
+    # run, which is a sharper check than "the file exists" anyway.
+    import json as _json
+    epoch_file = os.path.join(WORK, ".cache", "tracked_scroll_epoch.json")
+    written_after = virtual_time()
+
+    def clear_iss(dd):
+        dd.overhead.tracked_data = TRACKED2
+        dd.overhead.iss_pass_data = None
+
+    run_frames(d, 400, clear_iss)       # comfortably more than one cycle
+    if not os.path.isfile(epoch_file):
+        check("wrap writes the shared scroll epoch for the mirror", False,
+              "tracked_scroll_epoch.json was never written")
+    else:
+        with open(epoch_file) as _f:
+            ep = _json.load(_f)
+        check("wrap writes the shared scroll epoch for the mirror",
+              isinstance(ep.get("ts"), (int, float))
+              and ep.get("width", 0) > 0
+              and ep["ts"] >= written_after,
+              f"{ep!r} (must be written after {written_after})")
+        check("epoch width is the WIDEST line, not one of them",
+              ep.get("width") == max(d._tracked_widths.values()),
+              f"epoch {ep.get('width')} vs widths {d._tracked_widths}")
+
 elif SCENARIO == "isscameo":
     # Continuous plane traffic through a long ISS pass: verify the cameo
     # (one flight scroll cycle) runs, then the takeover holds for the rest
@@ -437,12 +661,19 @@ elif SCENARIO == "isscameo":
     check("dwell rotation: multiple ISS and flight slots alternate",
           len(iss_slots) >= 2 and len(flight_slots) >= 2,
           f"iss={len(iss_slots)} flight={len(flight_slots)}")
-    # interior ISS slots run the full dwell (~300 frames)
+    # Thresholds come from the scene's own constants, so they hold at any frame
+    # rate. They were 295 and 210 — the 10 fps values of DWELL_FRAMES and
+    # CAMEO_MAX_FRAMES with a little slack — so at 15 fps the dwell check passed
+    # trivially and the cameo cap check failed on a correct panel.
+    from scenes.isspass import CAMEO_MAX_FRAMES, DWELL_FRAMES
+    _slack = int(_frames.PER_SECOND)  # one second either way
     interior = iss_slots[:-1] if len(iss_slots) > 1 else iss_slots
-    check("ISS slots last the 30s dwell", all(n >= 295 for n in interior),
+    check("ISS slots last the 30s dwell",
+          all(n >= DWELL_FRAMES - _slack for n in interior),
           f"slot lengths {iss_slots}")
     check("flight slots bounded by cameo cap (<=20s + slack)",
-          all(n <= 210 for n in flight_slots[1:]), f"{flight_slots}")
+          all(n <= CAMEO_MAX_FRAMES + _slack for n in flight_slots[1:]),
+          f"{flight_slots}")
     iss_total = sum(iss_slots); flight_total = sum(flight_slots)
     print(f"INFO  pass split: ISS {iss_total}f ({100*iss_total//(iss_total+flight_total)}%), "
           f"flights {flight_total}f across {len(flight_slots)} slots")
@@ -457,6 +688,30 @@ elif SCENARIO == "isscameo":
                 if w[2] == (100, 130, 180)]
     check("ISS badge drawn in indicator zone during flight slots",
           bool(badge_px), "no steel-blue writes in zone")
+    # ...but "the badge appeared" is satisfied by a badge STUCK ON, which is the
+    # likelier way this breaks. The zone has to ALTERNATE: page count on one
+    # blink face, "ISS" on the other. Phase is int(time.time()//2)%2 in
+    # scenes/flightdetails.py and the virtual clock puts frame 0 in phase 0, so
+    # frame f should show the badge iff (f // ISS_BADGE_PHASE_FRAMES) % 2 == 1.
+    # Constants are imported, not copied, so this tracks the app if the blink is
+    # retuned or the colour changes.
+    from scenes.flightdetails import ISS_BADGE_COLOUR, ISS_BADGE_PHASE_FRAMES
+    _badge_rgb = (ISS_BADGE_COLOUR.red, ISS_BADGE_COLOUR.green, ISS_BADGE_COLOUR.blue)
+    faces, seq = {}, []
+    for f, a, i in timeline:          # timeline is in frame order
+        if a or not (PASS_START + 50 <= f < PASS_END):
+            continue
+        cols = {w[2] for w in RECORDER.zone_writes(f, IND_X0, IND_X1, IND_Y0, IND_Y1)}
+        if not cols:
+            continue                  # draw-on-change: only flip frames write
+        face = "ISS" if _badge_rgb in cols else "count"
+        faces.setdefault((f // ISS_BADGE_PHASE_FRAMES) % 2, set()).add(face)
+        seq.append(face)
+    detail = "phase->faces " + repr({k: sorted(v) for k, v in sorted(faces.items())})
+    check("indicator alternates count <-> ISS badge, each on its own blink face",
+          faces.get(0) == {"count"} and faces.get(1) == {"ISS"}, detail)
+    flips = sum(1 for x, y in zip(seq, seq[1:]) if x != y)
+    check("badge blinks repeatedly, not once", flips >= 4, f"only {flips} face changes")
     check("takeover released after pass end",
           not [f for f, a, i in timeline if f > PASS_END + 1 and a], "")
 
@@ -496,10 +751,10 @@ elif SCENARIO == "isscap":
           bool(active_frames), "ISS never took over — cameo starved it")
     if active_frames:
         t0 = min(active_frames)
-        print(f"INFO  takeover started at frame {t0} "
-              f"({(t0 - PASS_START) / 10.0:.0f}s into the pass)")
-        check("takeover within 25s of pass start", t0 - PASS_START <= 250,
-              f"took {(t0 - PASS_START) / 10.0:.0f}s")
+        _secs = (t0 - PASS_START) / _frames.PER_SECOND
+        print(f"INFO  takeover started at frame {t0} ({_secs:.0f}s into the pass)")
+        check("takeover within 25s of pass start", _secs <= 25,
+              f"took {_secs:.0f}s")
 
 elif SCENARIO == "idle":
     # Idle-mode (clock page) flicker regression: with constant weather data
