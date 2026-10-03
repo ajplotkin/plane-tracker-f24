@@ -248,9 +248,7 @@ class TestFlightCounter:
 
     def test_first_flight_creates_file(self):
         self.oh.log_flight_count("UAL123", {"origin": "EWR", "destination": "LAX"})
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         assert today in data
         assert data[today]["count"] == 1
@@ -261,9 +259,7 @@ class TestFlightCounter:
     def test_aircraft_type_logged(self):
         """Aircraft type from entry['plane'] stored as 'aircraft' in counter."""
         self.oh.log_flight_count("UAL123", {"origin": "EWR", "destination": "LAX", "plane": "B738"})
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         assert data[today]["flights"][0]["aircraft"] == "B738"
 
@@ -271,9 +267,7 @@ class TestFlightCounter:
         """Same callsign counted only once per day."""
         self.oh.log_flight_count("UAL123", {"origin": "EWR", "destination": "LAX"})
         self.oh.log_flight_count("UAL123", {"origin": "EWR", "destination": "LAX"})
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         assert data[today]["count"] == 1
 
@@ -281,9 +275,7 @@ class TestFlightCounter:
         self.oh.log_flight_count("UAL123", {"origin": "EWR", "destination": "LAX"})
         self.oh.log_flight_count("DAL456", {"origin": "JFK", "destination": "ATL"})
         self.oh.log_flight_count("AAL789", {"origin": "DFW", "destination": "ORD"})
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         assert data[today]["count"] == 3
 
@@ -294,9 +286,7 @@ class TestFlightCounter:
     def test_none_entry(self):
         """None entry should not crash."""
         self.oh.log_flight_count("UAL123", None)
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         assert data[today]["count"] == 1
         assert data[today]["flights"][0]["origin"] == ""
@@ -304,9 +294,7 @@ class TestFlightCounter:
     def test_hour_field(self):
         """Hour field should be an integer 0-23."""
         self.oh.log_flight_count("UAL123")
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         hour = data[today]["flights"][0]["hour"]
         assert isinstance(hour, int)
@@ -315,9 +303,7 @@ class TestFlightCounter:
     def test_first_last_seen(self):
         self.oh.log_flight_count("UAL123")
         self.oh.log_flight_count("DAL456")
-        import json
-        with open(self.counter_file) as f:
-            data = json.load(f)
+        data = self.oh.load_counter_log()
         today = str(__import__("datetime").datetime.now().date())
         assert data[today]["first_seen"]
         assert data[today]["last_seen"]

@@ -262,6 +262,43 @@ _CACHE_MAX_SIZE = 500  # Evict oldest entries beyond this
 
 # Utility Functions
 
+# Parsed copies of the closest/farthest record lists, keyed by path and checked
+# against the file's (mtime, size) before use. Both lists are read for every
+# flight on every cycle; with full trails per entry they are 0.5-0.8 MB, and on
+# ernie parsing them took 34 + 54 ms with the GIL held — over a whole frame at
+# 15 fps, every cycle, for nothing, since only this process writes them. A file
+# changed by anything else (a restore from backup) has a new stat and is re-read.
+_record_cache = {}
+
+
+def _file_sig(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _load_record_list(path):
+    sig = _file_sig(path)
+    hit = _record_cache.get(path)
+    if hit is not None and sig is not None and hit[0] == sig:
+        return list(hit[1])                 # shallow copy: callers append/sort
+    data = safe_load_json(path)
+    if sig is not None:
+        _record_cache[path] = (sig, list(data))
+    return data
+
+
+def _write_record_list(path, data):
+    safe_write_json(path, data)
+    sig = _file_sig(path)
+    if sig is not None:
+        _record_cache[path] = (sig, list(data))
+    else:
+        _record_cache.pop(path, None)
+
+
 def safe_load_json(path: str):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -530,6 +567,117 @@ def _adsbdb_aircraft(registration):
         return {}
 
 
+# --- Flight counter: one file per day -------------------------------------
+#
+# This was one JSON file holding every day's flights, and log_flight_count read
+# ALL of it on every call — once per flight per cycle — just to ask whether a
+# callsign had been seen today, then rewrote all of it when one was new. By
+# October it was 6.3 MB on ernie (91 days, 27,567 flights): 300-360 ms to parse
+# and ~200 ms to write on a Pi, all inside C code holding the GIL. The render
+# thread could not run for that long, so the panel froze for a fifth to a
+# quarter of a second every time a flight was processed. The frame-budget
+# telemetry in utilities/animator.py found it.
+#
+# Now: one small file per day under flight_counter.d/, and today's callsigns
+# kept in memory. An already-counted flight costs a set lookup; a new one
+# rewrites only today's file. Readers get the same date-keyed dict as before
+# from load_counter_log(), so the stats pages see no difference.
+#
+# The directory is derived from COUNTER_FILE at call time (not a separate
+# constant) so anything that points COUNTER_FILE somewhere else — tests do —
+# gets its own directory instead of writing into the real one.
+
+_counter_mem = {"path": None, "day": None, "doc": None, "seen": set()}
+
+
+def _counter_dir():
+    return os.path.splitext(COUNTER_FILE)[0] + ".d"
+
+
+def _migrate_legacy_counter():
+    """Split the old single-file counter into per-day files, once.
+
+    Idempotent and crash-safe: a day file that already exists is never
+    overwritten, and the old file is only renamed aside (to .migrated, kept as
+    a backup) after every day is written, so an interrupted run just resumes.
+    Readers merge both sources, so they see complete data mid-migration too.
+    """
+    legacy = COUNTER_FILE
+    if not os.path.exists(legacy):
+        return
+    try:
+        with open(legacy, "r", encoding="utf-8") as f:
+            log = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(log, dict):
+        return
+    d = _counter_dir()
+    os.makedirs(d, exist_ok=True)
+    for day, doc in log.items():
+        path = os.path.join(d, f"{day}.json")
+        if isinstance(doc, dict) and not os.path.exists(path):
+            safe_write_json(path, doc)
+    try:
+        os.replace(legacy, legacy + ".migrated")
+        logger.info(f"Flight counter: split {len(log)} day(s) into {d}")
+    except OSError as e:
+        logger.warning(f"Flight counter: could not retire {legacy}: {e}")
+
+
+def _prune_counter_days(d, today):
+    try:
+        from config import STATS_LOG_DAYS
+    except (ImportError, NameError):
+        STATS_LOG_DAYS = 90
+    if not STATS_LOG_DAYS or STATS_LOG_DAYS <= 0:
+        return
+    cutoff = str((datetime.now() - timedelta(days=STATS_LOG_DAYS)).date())
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for name in names:
+        day = name[:-5] if name.endswith(".json") else None
+        if day and day < cutoff and day != today:
+            try:
+                os.remove(os.path.join(d, name))
+            except OSError:
+                pass
+
+
+def load_counter_log():
+    """Every day's counter, as the date-keyed dict the old single file held.
+
+    Merges a not-yet-migrated legacy file with the per-day files (the day
+    files win), so it is correct before, during and after migration.
+    """
+    log = {}
+    try:
+        with open(COUNTER_FILE, "r", encoding="utf-8") as f:
+            legacy = json.load(f)
+        if isinstance(legacy, dict):
+            log.update(legacy)
+    except (OSError, ValueError):
+        pass
+    d = _counter_dir()
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict):
+            log[name[:-5]] = doc
+    return log
+
+
 def log_flight_count(callsign, entry=None):
     """Log unique callsign to daily flight counter. De-duplicates per day.
     Concept from c0wsaysmoo/plane-tracker-rgb-pi."""
@@ -540,43 +688,43 @@ def log_flight_count(callsign, entry=None):
     now = datetime.now()
     today = str(now.date())
     now_str = now.strftime("%H:%M:%S")
+    d = _counter_dir()
+    mem = _counter_mem
 
-    try:
-        with open(COUNTER_FILE, "r", encoding="utf-8") as f:
-            log = json.load(f)
-        if not isinstance(log, dict):
-            log = {}
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        log = {}
-
-    if today not in log:
-        log[today] = {"date": today, "count": 0, "flights": [],
-                      "first_seen": now_str, "last_seen": now_str}
-
-    seen = {e["callsign"] for e in log[today].get("flights", [])}
-    if callsign not in seen:
-        log[today]["flights"].append({
-            "callsign": callsign,
-            "time": now_str,
-            "hour": now.hour,
-            "origin": entry.get("origin", ""),
-            "dest": entry.get("destination", ""),
-            "aircraft": entry.get("plane", ""),
-        })
-        log[today]["count"] = len(log[today]["flights"])
-        log[today]["last_seen"] = now_str
-
-        # Prune entries older than configured retention period
+    if mem["path"] != d or mem["day"] != today:
+        # First call, a new day, or a different counter location: (re)load
+        # TODAY's file only — small, and once per day rather than per flight.
+        _migrate_legacy_counter()
+        doc = None
         try:
-            from config import STATS_LOG_DAYS
-        except (ImportError, NameError):
-            STATS_LOG_DAYS = 90
-        cutoff = str((now - timedelta(days=STATS_LOG_DAYS)).date())
-        old_keys = [k for k in log if k < cutoff and k != today]
-        for k in old_keys:
-            del log[k]
+            with open(os.path.join(d, f"{today}.json"), "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if not isinstance(doc, dict) or not isinstance(doc.get("flights"), list):
+            doc = {"date": today, "count": 0, "flights": [],
+                   "first_seen": now_str, "last_seen": now_str}
+        mem.update(path=d, day=today, doc=doc,
+                   seen={e.get("callsign") for e in doc["flights"]})
+        _prune_counter_days(d, today)
 
-        safe_write_json(COUNTER_FILE, log)
+    if callsign in mem["seen"]:
+        return      # the common case — no file I/O at all
+
+    doc = mem["doc"]
+    doc["flights"].append({
+        "callsign": callsign,
+        "time": now_str,
+        "hour": now.hour,
+        "origin": entry.get("origin", ""),
+        "dest": entry.get("destination", ""),
+        "aircraft": entry.get("plane", ""),
+    })
+    doc["count"] = len(doc["flights"])
+    doc["last_seen"] = now_str
+    mem["seen"].add(callsign)
+    os.makedirs(d, exist_ok=True)
+    safe_write_json(os.path.join(d, f"{today}.json"), doc)
 
 
 def load_tracked_callsign():
@@ -756,7 +904,7 @@ def tracked_completion_decision(sched, leg_gone, pin_dep_ts, cached_route, now):
 def log_flight_data(entry: dict):
     try:
         entry["timestamp"] = email_alerts.get_timestamp()
-        lst = safe_load_json(LOG_FILE)
+        lst = _load_record_list(LOG_FILE)
 
         callsigns = {f.get("callsign"): f for f in lst}
         new_call = entry.get("callsign")
@@ -783,7 +931,7 @@ def log_flight_data(entry: dict):
         if new_call not in callsigns:
             notify = True
 
-        safe_write_json(LOG_FILE, top_n)
+        _write_record_list(LOG_FILE, top_n)
 
         if notify:
             _ensure_map_imports()
@@ -816,7 +964,7 @@ def log_farthest_flight(entry: dict):
         entry["farthest_value"] = far
         entry["_airport"] = airport
 
-        lst = safe_load_json(LOG_FILE_FARTHEST)
+        lst = _load_record_list(LOG_FILE_FARTHEST)
         airport_map = {f["_airport"]: f for f in lst}
 
         existing = airport_map.get(airport)
@@ -838,7 +986,7 @@ def log_farthest_flight(entry: dict):
 
         lst.sort(key=lambda x: x["farthest_value"], reverse=True)
         lst = lst[:MAX_FARTHEST]
-        safe_write_json(LOG_FILE_FARTHEST, lst)
+        _write_record_list(LOG_FILE_FARTHEST, lst)
 
         html = None
         if notify or updated:

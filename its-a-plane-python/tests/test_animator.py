@@ -182,3 +182,68 @@ class TestPanelFpsSetting:
                 if k == 0.2:          # loading pulse rounds by design
                     continue
                 assert d == int(d), f"PER_SECOND*{k} = {d} at {fps} fps"
+
+
+class TestGcPauseTelemetry:
+    """A collection holds the GIL, so a slow one in any thread shows up as a
+    late frame start. The per-minute report has to be able to say so."""
+
+    def _collect(self, seconds, gen=2):
+        t = [500.0]
+        with patch.object(anim, "monotonic", lambda: t[0]):
+            anim._gc_callback("start", {"generation": gen})
+            t[0] += seconds
+            anim._gc_callback("stop", {"generation": gen})
+
+    def setup_method(self):
+        anim._gc_stats.update(slow=0, worst=0.0, worst_gen=-1)
+
+    def test_a_slow_collection_is_counted_with_its_generation(self):
+        self._collect(0.180, gen=2)
+        assert anim._gc_stats["slow"] == 1
+        assert round(anim._gc_stats["worst"], 3) == 0.180
+        assert anim._gc_stats["worst_gen"] == 2
+
+    def test_a_fast_collection_is_not(self):
+        self._collect(0.004, gen=0)
+        assert anim._gc_stats["slow"] == 0
+
+    def test_the_callback_is_installed_once(self):
+        import gc
+        assert gc.callbacks.count(anim._gc_callback) == 1
+
+    def test_slow_gc_is_named_in_the_report(self, caplog):
+        caplog.set_level(logging.INFO, logger=anim.__name__)
+
+        def work(f):
+            if f == 50:                 # a collection during a fetch thread
+                self._collect(0.180)
+            return 0.090 if f == 50 else 0.002
+        _run(work, frames=15 * 65)
+        msgs = [r.message for r in caplog.records if "deadline" in r.message]
+        assert msgs and "GC pause" in msgs[0] and "gen 2" in msgs[0], msgs
+        assert " at " in msgs[0]
+
+
+def test_the_report_names_the_slow_keyframe(caplog):
+    caplog.set_level(logging.INFO, logger=anim.__name__)
+    clock = _Clock()
+
+    class Scene(Animator):
+        @Animator.KeyFrame.add(1)
+        def cheap(self, count):
+            clock.t += 0.002
+
+        @Animator.KeyFrame.add(1)
+        def heavy_redraw(self, count):
+            clock.t += 0.250 if self.frame == 40 else 0.001
+            if self.frame >= 15 * 65:
+                raise _Stop
+
+    with patch.object(anim, "monotonic", clock.monotonic), \
+         patch.object(anim, "sleep", clock.sleep):
+        s = Scene(); s.delay = 1 / 15
+        with pytest.raises(_Stop):
+            s.play()
+    msgs = [r.message for r in caplog.records if "deadline" in r.message]
+    assert msgs and "slowest keyframe heavy_redraw 250 ms" in msgs[0], msgs

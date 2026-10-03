@@ -1,7 +1,34 @@
+import gc
 import logging
-from time import sleep, monotonic
+from time import sleep, monotonic, strftime, localtime, time
 
 _log = logging.getLogger(__name__)
+
+
+# Garbage-collector pause telemetry. A collection holds the GIL for its whole
+# duration, so a slow one in ANY thread delays the render thread's next frame —
+# it shows in the frame telemetry as a late start with little work, which is
+# what an unexplained ~200 ms hitch looked like on 2026-10-03. Counting slow
+# collections here lets the per-minute report say whether GC was the cause.
+_GC_SLOW_S = 0.05
+_gc_stats = {"slow": 0, "worst": 0.0, "worst_gen": -1, "t0": 0.0}
+
+
+def _gc_callback(phase, info):
+    # Runs inside the collector: keep it to arithmetic, no allocation-heavy work.
+    if phase == "start":
+        _gc_stats["t0"] = monotonic()
+        return
+    d = monotonic() - _gc_stats["t0"]
+    if d > _GC_SLOW_S:
+        _gc_stats["slow"] += 1
+        if d > _gc_stats["worst"]:
+            _gc_stats["worst"] = d
+            _gc_stats["worst_gen"] = info.get("generation", -1)
+
+
+if _gc_callback not in gc.callbacks:
+    gc.callbacks.append(_gc_callback)
 
 DELAY_DEFAULT = 0.01
 
@@ -38,7 +65,9 @@ class Animator(object):
         self._delay = DELAY_DEFAULT
         # Frame-budget telemetry, reset every minute; see play().
         self._frame_budget = {"n": 0, "over": 0, "worst_work": 0.0,
-                              "worst_wake": 0.0, "t": monotonic()}
+                              "worst_wake": 0.0, "worst_at": 0.0,
+                              "worst_kf": "", "worst_kf_t": 0.0,
+                              "t": monotonic()}
 
         self._register_keyframes()
 
@@ -64,7 +93,9 @@ class Animator(object):
         next_frame = monotonic()
         while True:
             t0 = monotonic()   # when this frame's work actually began
+            _slow_kf, _slow_kf_t = None, 0.0
             for keyframe in self.keyframes:
+                _kf_t0 = monotonic()
                 # A single scene keyframe raising must NOT kill the animation
                 # loop — that propagates out of play() and freezes the ENTIRE
                 # panel on the last frame. Isolate each keyframe: log (throttled
@@ -88,6 +119,12 @@ class Animator(object):
                             keyframe.properties["count"] = 0
                         else:
                             keyframe.properties["count"] += 1
+                    # Which keyframe made a slow frame slow. Without this, the
+                    # telemetry could say a frame did 250 ms of work but not
+                    # whose work it was.
+                    _kf_d = monotonic() - _kf_t0
+                    if _kf_d > _slow_kf_t:
+                        _slow_kf, _slow_kf_t = keyframe, _kf_d
                 except Exception:
                     _name = getattr(keyframe, "__name__", repr(keyframe))
                     _errs = self.__dict__.setdefault("_keyframe_err_ts", {})
@@ -120,16 +157,37 @@ class Animator(object):
             if _work + _wake > self._delay:
                 _fb["over"] += 1
                 _fb["worst_work"] = max(_fb["worst_work"], _work)
-                _fb["worst_wake"] = max(_fb["worst_wake"], _wake)
+                if _slow_kf is not None and _slow_kf_t > _fb["worst_kf_t"]:
+                    _fb["worst_kf_t"] = _slow_kf_t
+                    _fb["worst_kf"] = getattr(_slow_kf, "__name__", "?")
+                if _wake > _fb["worst_wake"]:
+                    _fb["worst_wake"] = _wake
+                    # Wall-clock time of the worst stall, so it can be lined up
+                    # against the journal (FR24 polls, fetches, restarts).
+                    _fb["worst_at"] = time()
             if now - _fb["t"] >= 60:
                 if _fb["over"]:
+                    _gcs = ""
+                    if _gc_stats["slow"]:
+                        _gcs = (f"; {_gc_stats['slow']} GC pause(s) over "
+                                f"{_GC_SLOW_S * 1000:.0f} ms, worst "
+                                f"{_gc_stats['worst'] * 1000:.0f} ms "
+                                f"(gen {_gc_stats['worst_gen']})")
+                    _at = (strftime("%H:%M:%S", localtime(_fb["worst_at"]))
+                           if _fb["worst_at"] else "-")
+                    _kf = (f"; slowest keyframe {_fb['worst_kf']} "
+                           f"{_fb['worst_kf_t'] * 1000:.0f} ms"
+                           if _fb["worst_kf"] else "")
                     _log.info(
                         "Animator: %d/%d frames missed the %.0f ms deadline in "
                         "the last minute (worst work %.0f ms, worst late start "
-                        "%.0f ms)",
+                        "%.0f ms at %s%s%s)",
                         _fb["over"], _fb["n"], self._delay * 1000,
-                        _fb["worst_work"] * 1000, _fb["worst_wake"] * 1000)
-                _fb.update(n=0, over=0, worst_work=0.0, worst_wake=0.0, t=now)
+                        _fb["worst_work"] * 1000, _fb["worst_wake"] * 1000,
+                        _at, _kf, _gcs)
+                _fb.update(n=0, over=0, worst_work=0.0, worst_wake=0.0,
+                           worst_at=0.0, worst_kf="", worst_kf_t=0.0, t=now)
+                _gc_stats.update(slow=0, worst=0.0, worst_gen=-1)
 
             if next_frame < now:
                 next_frame = now  # fell behind; don't burst to catch up

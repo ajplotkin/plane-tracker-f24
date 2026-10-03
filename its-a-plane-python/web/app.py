@@ -602,18 +602,14 @@ def api_aircraft_types():
 
 
 # Flight counter and stats (concept from c0wsaysmoo/plane-tracker-rgb-pi)
-from utilities.overhead import COUNTER_FILE
+from utilities.overhead import load_counter_log
 
 
 @app.get("/counter")
 def flight_counter():
     """Return full flight counter log (date-keyed dict)."""
     try:
-        with open(COUNTER_FILE, "r", encoding="utf-8") as f:
-            log = json.load(f)
-        if not isinstance(log, dict):
-            return jsonify({})
-        return jsonify(log)
+        return jsonify(load_counter_log())
     except Exception:
         return jsonify({})
 
@@ -622,10 +618,7 @@ def flight_counter():
 def flight_counter_summary():
     """Return daily summary stats for graphing."""
     try:
-        with open(COUNTER_FILE, "r", encoding="utf-8") as f:
-            log = json.load(f)
-        if not isinstance(log, dict):
-            return jsonify([])
+        log = load_counter_log()
         summary = []
         for day, data in sorted(log.items()):
             by_hour = [0] * 24
