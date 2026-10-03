@@ -245,7 +245,12 @@ class ISSPassScene(object):
         theme = THEME_VISIBLE if visible else THEME_DIM
 
         # Element states this frame
-        blink_phase = second % 2
+        # Wall-clock seconds, not seconds-since-the-scene-started: the mirror
+        # blinks on floor(serverNow()) % 2, so a frame-count phase was in step
+        # with it only by luck and anti-phase the rest of the time. The ISS
+        # badge in flightdetails was fixed the same way for the same reason.
+        import time as _t
+        blink_phase = int(_t.time()) % 2
         title_text = "ISS VISIBLE" if visible else "ISS OVERHEAD"
         title_x = max(0, (screen.WIDTH - len(title_text) * 4) // 2)
         pixels, sprite_w, sprite_h = _load_iss_sprite()

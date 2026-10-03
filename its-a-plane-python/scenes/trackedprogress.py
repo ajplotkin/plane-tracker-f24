@@ -58,8 +58,8 @@ class TrackedProgressScene(object):
         plane_x = max(0, min(usable, int(progress * usable)))
         is_live = tracked.get("is_live", True)
 
-        # The canvas is live — clearing + redrawing the identical bar at
-        # 10fps was constant flicker while the plane moves ~1px/min.
+        # The canvas is live — clearing + redrawing the identical bar every
+        # frame was constant flicker while the plane moves ~1px/min.
         # Repaint only when the bar's content actually changes.
         state = (plane_x, is_live)
         if state == self._progress_state:

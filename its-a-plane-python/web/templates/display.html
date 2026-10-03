@@ -177,7 +177,11 @@ canvas {
 // reaches the mirror on the next poll. At 2000ms that lagged the LED by up to
 // ~2s (very visible on the fast-paging overhead-flights scene); the endpoint
 // is ~9ms so 1000ms is trivially cheap and halves the page-change lag.
-const COLS = 64, ROWS = 32, FPS = 15, POLL_MS = 1000;
+// FPS is how often the MIRROR redraws, not the panel's rate (that comes from
+// the server as scroll_px_per_sec). At 15 it matched a 10 fps panel with room
+// to spare, but setTimeout drifts below its target, so against a 15 px/s panel
+// it aliased into occasional 2-px jumps. 30 keeps every 1-px step visible.
+const COLS = 64, ROWS = 32, FPS = 30, POLL_MS = 1000;
 
 // Font metrics: extrasmall=4x6, small=5x8 (width x height)
 const XS_W = 4, XS_H = 6, SM_W = 5, SM_H = 8;
@@ -244,6 +248,15 @@ const ALERT_COLORS = {
 
 // ── State ───────────────────────────────────────────────────────────────
 let S = 10, state = null;
+
+// Pixels per second the PANEL scrolls — one per frame, so its frame rate.
+// Read from the server rather than assumed: this was a literal 10 in two
+// places, and changing setup/frames.py would have desynced the mirror from
+// the panel without anything failing. 10 only until the first state arrives.
+function scrollRate() {
+    const r = state && Number(state.scroll_px_per_sec);
+    return r > 0 ? r : 10;
+}
 let flightIdx = 0;
 // C5: sticky client-side scroll epoch — captured ONCE when scroll_epoch.ts
 // is missing, never re-evaluated per frame
@@ -785,7 +798,7 @@ function drawFlight() {
     }
     const startPos = state.scroll_epoch?.pos ?? COLS;
     const elapsed = serverNow() - epochTs;
-    const scrolled = (((COLS - startPos + elapsed * 10) % cyclePx) + cyclePx) % cyclePx;
+    const scrolled = (((COLS - startPos + elapsed * scrollRate()) % cyclePx) + cyclePx) % cyclePx;
     const scrollPos = COLS - scrolled;
 
     // A1: flight-number line owns rows 17-24 (flightdetails.py; indicator
@@ -1042,7 +1055,7 @@ function drawTracked() {
     const tEpoch = tEp.ts || t._mirror_ts || serverNow();
     const tWidth = tEp.width || Math.max(rW, sW);
     const tCyclePx = COLS + tWidth + 1;
-    const tPos = COLS - (((serverNow() - tEpoch) * 10) % tCyclePx);
+    const tPos = COLS - (((serverNow() - tEpoch) * scrollRate()) % tCyclePx);
 
     if (logo) drawImage(logo, tPos, 12, logoW, logoW);
     textSegsKerned(rSegs, tPos + logoW + logoGap, 19, SM_W);

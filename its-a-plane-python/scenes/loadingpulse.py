@@ -1,5 +1,5 @@
 from utilities.animator import Animator
-from setup import colours
+from setup import colours, frames
 
 # Setup
 BLINKER_POSITION = (63, 0)
@@ -12,7 +12,10 @@ class LoadingPulseScene(object):
         super().__init__()
         self._pulse_lit = False
 
-    @Animator.KeyFrame.add(2)
+    # Every 0.2 s, whatever the frame rate. This was a literal 2 (frames), the
+    # one keyframe in the codebase that did not go through PER_SECOND, so it
+    # would have pulsed 50% faster at 15 fps.
+    @Animator.KeyFrame.add(max(1, round(frames.PER_SECOND * 0.2)))
     def loading_pulse(self, count):
         reset_count = True
         if self.overhead.processing:

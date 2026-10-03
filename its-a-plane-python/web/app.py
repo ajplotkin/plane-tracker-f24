@@ -19,6 +19,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from utilities.fr24_client import FR24Client
+from setup import frames as _frames
 
 # Singleton FR24Client shared across all web requests (shares cache + rate limiter)
 _fr24_client = FR24Client()
@@ -263,6 +264,21 @@ def closest_page():
 @app.get("/farthest")
 def farthest_page():
     return render_template("farthest_map.html")
+
+
+def _scroll_px_per_sec():
+    """Panel scroll speed in px/s — one pixel per frame, so frames.PER_SECOND.
+
+    Imported at module load with no fallback on purpose. A fallback of 10 was
+    the old hardcoded rate: correct only while the panel ran at 10 fps, and
+    silently wrong the moment it did not — the exact desync this exists to
+    remove. Failing to import setup.frames should fail loudly.
+
+    Note the web server reads its OWN copy of setup/frames.py: after changing
+    the rate, both processes must restart (a normal service restart does) or
+    the mirror runs at the old speed until the web process does.
+    """
+    return float(_frames.PER_SECOND)
 
 
 @app.get("/tracked/json")
@@ -667,7 +683,7 @@ def api_config_get():
         "JOURNEY_CODE_SELECTED", "TEMPERATURE_LOCATION", "TIDE_STATION",
         "WATER_TEMP_STATION", "WATER_TEMP_FALLBACK_STATION", "WATER_TEMP_FALLBACK_ENABLED", "AIRPORT_STATUS_LIST",
         "DISTANCE_UNITS", "SPEED_UNITS", "TEMPERATURE_UNITS", "CLOCK_FORMAT",
-        "BRIGHTNESS", "BRIGHTNESS_NIGHT", "GPIO_SLOWDOWN", "LED_RGB_SEQUENCE",
+        "BRIGHTNESS", "BRIGHTNESS_NIGHT", "GPIO_SLOWDOWN", "LED_RGB_SEQUENCE", "PANEL_FPS",
         "NIGHT_BRIGHTNESS", "NIGHT_START", "NIGHT_END", "HAT_PWM_ENABLED",
         "MIN_ALTITUDE", "JOURNEY_BLANK_FILLER", "FORECAST_DAYS", "BLOCKED_CALLSIGNS",
         "NWS_ALERTS_ENABLED", "ISS_ALERTS_ENABLED",
@@ -718,7 +734,7 @@ _VALID_CONFIG_KEYS = {
     "JOURNEY_CODE_SELECTED", "TEMPERATURE_LOCATION", "TIDE_STATION",
     "WATER_TEMP_STATION", "WATER_TEMP_FALLBACK_STATION", "WATER_TEMP_FALLBACK_ENABLED", "AIRPORT_STATUS_LIST",
     "DISTANCE_UNITS", "SPEED_UNITS", "TEMPERATURE_UNITS", "CLOCK_FORMAT",
-    "BRIGHTNESS", "BRIGHTNESS_NIGHT", "GPIO_SLOWDOWN", "LED_RGB_SEQUENCE",
+    "BRIGHTNESS", "BRIGHTNESS_NIGHT", "GPIO_SLOWDOWN", "LED_RGB_SEQUENCE", "PANEL_FPS",
     "NIGHT_BRIGHTNESS", "NIGHT_START", "NIGHT_END", "HAT_PWM_ENABLED",
     "MIN_ALTITUDE", "JOURNEY_BLANK_FILLER", "FORECAST_DAYS", "BLOCKED_CALLSIGNS",
     "NWS_ALERTS_ENABLED", "ISS_ALERTS_ENABLED",
@@ -1473,6 +1489,11 @@ def api_display_state():
         "temperature_units": temperature_units,
         "speed_units": speed_units,
         "atc": atc,                    # {mode, station, stream_url, playing, output, volume}
+        # The panel scrolls exactly one pixel per frame, so its speed IS its
+        # frame rate. The mirror used to hardcode 10 px/s, which tied
+        # setup/frames.py to a number in a template: change PERIOD and the
+        # mirror silently drifts out of step with the panel it claims to show.
+        "scroll_px_per_sec": _scroll_px_per_sec(),
     })
 
 

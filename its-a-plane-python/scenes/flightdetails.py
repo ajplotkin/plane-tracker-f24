@@ -1,6 +1,6 @@
 from utilities.animator import Animator
 from utilities import textclip
-from setup import colours, fonts, screen
+from setup import colours, fonts, screen, frames
 
 from rgbmatrix import graphics
 
@@ -22,7 +22,7 @@ DATA_INDEX_COLOUR = colours.GREY
 # 12px wide) alternates with the page indicator every 2 s; with a single
 # flight it shows steadily. Steel blue matches the ISS alert colour.
 ISS_BADGE_COLOUR = graphics.Color(100, 130, 180)
-ISS_BADGE_PHASE_FRAMES = 20  # 2 s per face
+ISS_BADGE_PHASE_FRAMES = int(frames.PER_SECOND * 2)  # 2 s per face, at any frame rate
 
 # The canvas is live (sync() discards SwapOnVSync's return, so self.canvas
 # IS the displayed framebuffer). Every write is visible immediately —
