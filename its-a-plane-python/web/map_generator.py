@@ -46,7 +46,10 @@ def align_to_reference_tile(lon, ref_lon):
 def generate_closest_map(entries, filename="closest.html"):
     m = folium.Map(location=LOCATION_HOME[:2], zoom_start=10)
     unit_label = get_unit_label()
-    colors = ["red","blue","green","purple","pink","darkred","darkblue","darkgreen","cadetblue","brown"]
+    # Each colour is used for a folium pin AND as CSS for the record's lines, so
+    # it must be valid in both. "brown" was here: fine as CSS but not a folium
+    # icon colour, so every tenth record's pin got a style that does not exist.
+    colors = ["red","blue","green","purple","pink","darkred","darkblue","darkgreen","cadetblue","black"]
 
     folium.Marker(LOCATION_HOME[:2], popup="Home", icon=folium.Icon(color="orange")).add_to(m)
     all_locs = [LOCATION_HOME[:2]]
@@ -81,7 +84,10 @@ def generate_closest_map(entries, filename="closest.html"):
 
 def generate_farthest_map(entries, filename="farthest.html"):
     unit_label = get_unit_label()
-    colors = ["red","blue","green","purple","pink","darkred","darkblue","darkgreen","cadetblue","brown"]
+    # Each colour is used for a folium pin AND as CSS for the record's lines, so
+    # it must be valid in both. "brown" was here: fine as CSS but not a folium
+    # icon colour, so every tenth record's pin got a style that does not exist.
+    colors = ["red","blue","green","purple","pink","darkred","darkblue","darkgreen","cadetblue","black"]
 
     m = folium.Map(location=LOCATION_HOME[:2], zoom_start=4)
     folium.Marker(LOCATION_HOME[:2], popup="Home", icon=folium.Icon(color="orange")).add_to(m)

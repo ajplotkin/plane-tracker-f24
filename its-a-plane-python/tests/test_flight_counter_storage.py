@@ -384,3 +384,74 @@ class TestCachedEntriesAreNotTheCallersDicts:
             oh._write_record_list(p, [{"callsign": "NEVER_SAVED"}])
         assert oh._load_record_list(p) == [{"callsign": "A"}]
         oh._record_cache.clear()
+
+
+class TestAMapFailureDoesNotCancelTheAlert:
+    """On ernie and lauri the maps directory was root-owned from June, so every
+    map write raised PermissionError — and because that propagated out of the
+    logger, the "new farthest/closest flight" email after it never went out."""
+
+    def _entry(self):
+        return {"callsign": "BAW1", "distance": 0.5, "distance_origin": 9000,
+                "distance_destination": 10, "origin": "SIN", "destination": "LHR"}
+
+    @pytest.fixture
+    def logs(self, tmp_path, monkeypatch):
+        oh._record_cache.clear()
+        oh._map_write_warned.clear()
+        monkeypatch.setattr(oh, "LOG_FILE", str(tmp_path / "close.txt"))
+        monkeypatch.setattr(oh, "LOG_FILE_FARTHEST", str(tmp_path / "farthest.txt"))
+        monkeypatch.setattr(oh, "_ensure_map_imports", lambda: None)
+
+        class _MG:
+            @staticmethod
+            def generate_closest_map(entries, filename):
+                raise PermissionError(13, "Permission denied", filename)
+            generate_farthest_map = generate_closest_map
+        monkeypatch.setattr(oh, "map_generator", _MG)
+        sent = []
+        monkeypatch.setattr(oh.email_alerts, "send_flight_summary",
+                            lambda subject, entry, *a, **k: sent.append((subject, k.get("map_url"))))
+        yield sent
+        oh._record_cache.clear()
+
+    def test_the_farthest_alert_still_goes_out_without_a_map(self, logs):
+        oh.log_farthest_flight(self._entry())
+        assert logs, "the farthest-flight email was dropped because the map failed"
+        assert logs[0][1] is None, "a map URL was sent for a map that does not exist"
+
+    def test_the_closest_alert_still_goes_out_without_a_map(self, logs):
+        oh.log_flight_data(self._entry())
+        assert logs, "the closest-flight email was dropped because the map failed"
+
+    def test_the_record_is_saved_either_way(self, logs):
+        oh.log_farthest_flight(self._entry())
+        with open(oh.LOG_FILE_FARTHEST) as f:
+            assert json.load(f)[0]["callsign"] == "BAW1"
+
+    def test_the_permission_problem_is_reported_once_not_every_record(self, logs, caplog):
+        import logging
+        caplog.set_level(logging.ERROR)
+        e2 = dict(self._entry(), callsign="QFA2", destination="SYD", distance_origin=10,
+                  distance_destination=9500, origin="LHR")
+        oh.log_farthest_flight(self._entry())
+        oh.log_farthest_flight(e2)
+        errs = [r for r in caplog.records if "Cannot write map farthest.html" in r.message]
+        assert len(errs) == 1, f"{len(errs)} errors for one cause"
+        assert "chmod" in errs[0].message, "the error does not say how to fix it"
+
+
+def test_every_map_colour_is_valid_for_folium_pins_and_css_lines():
+    """Each colour draws a pin (folium Icon) and the record's lines (CSS)."""
+    import re, pathlib
+    folium_map = pytest.importorskip("folium.map")
+    css = {"beige", "black", "blue", "cadetblue", "darkblue", "darkgreen", "darkred",
+           "gray", "green", "lightblue", "lightgray", "lightgreen", "orange", "pink",
+           "purple", "red", "white", "brown"}
+    src = (pathlib.Path(__file__).resolve().parent.parent / "web" / "map_generator.py").read_text()
+    lists = re.findall(r"colors = \[([^\]]*)\]", src)
+    assert lists, "palette not found"
+    for lst in lists:
+        for c in re.findall(r'"([a-z]+)"', lst):
+            assert c in folium_map.Icon.color_options, f"{c!r} is not a folium pin colour"
+            assert c in css, f"{c!r} is not a CSS colour name"

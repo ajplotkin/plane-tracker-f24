@@ -986,6 +986,38 @@ def tracked_completion_decision(sched, leg_gone, pin_dep_ts, cached_route, now):
 
 # Logging Closest Flights
 
+_map_write_warned = set()
+
+
+def _regenerate_map(generate, entries, filename):
+    """Rebuild a closest/farthest map. Returns its HTML, or None if it failed.
+
+    Contained on purpose. The map is a nice-to-have attached to a record, and
+    its failure used to propagate out of the logger, which skipped the "new
+    closest / farthest flight" email after the record had already been saved.
+    On ernie and lauri the maps directory had been root-owned since June while
+    the display runs as daemon, so for four months every record alert was
+    silently dropped along with its map.
+    """
+    try:
+        _ensure_map_imports()
+        return generate(entries, filename=filename)
+    except PermissionError as e:
+        # Say what to do, once per file per process, rather than a traceback
+        # on every record.
+        if filename not in _map_write_warned:
+            _map_write_warned.add(filename)
+            logger.error(
+                f"Cannot write map {filename}: {e}. The display runs as an "
+                f"unprivileged user; make the maps directory and its files "
+                f"writable (chmod 777 <dir>, chmod 666 <dir>/*.html). The "
+                f"record itself was saved and alerts still go out.")
+        return None
+    except Exception as e:
+        logger.warning(f"Map {filename} could not be generated: {e}")
+        return None
+
+
 def log_flight_data(entry: dict):
     try:
         entry["timestamp"] = email_alerts.get_timestamp()
@@ -1019,9 +1051,9 @@ def log_flight_data(entry: dict):
         _write_record_list(LOG_FILE, top_n)
 
         if notify:
-            _ensure_map_imports()
-            html = map_generator.generate_closest_map(top_n, filename="closest.html")
-            url = upload_helper.upload_map_to_server(html)
+            html = _regenerate_map(lambda e, filename: map_generator.generate_closest_map(e, filename=filename),
+                                   top_n, "closest.html")
+            url = upload_helper.upload_map_to_server(html) if html else None
             subject = f"New {ordinal(rank)} Closest Flight - {entry.get('callsign','Unknown')}"
             email_alerts.send_flight_summary(subject, entry, map_url=url)
 
@@ -1075,11 +1107,11 @@ def log_farthest_flight(entry: dict):
 
         html = None
         if notify or updated:
-            _ensure_map_imports()
-            html = map_generator.generate_farthest_map(lst, filename="farthest.html")
+            html = _regenerate_map(lambda e, filename: map_generator.generate_farthest_map(e, filename=filename),
+                                   lst, "farthest.html")
 
-        if notify and html:
-            url = upload_helper.upload_map_to_server(html)
+        if notify:
+            url = upload_helper.upload_map_to_server(html) if html else None
             rank = next(i for i, f in enumerate(lst) if f["_airport"] == airport) + 1
             cs = entry.get("callsign", "UNKNOWN")
             if rank == 1:
