@@ -19,6 +19,8 @@ import threading
 import tempfile
 from unittest.mock import patch
 
+import pytest
+
 
 # Ensure the project root is on sys.path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -761,3 +763,46 @@ def test_clean_airline_maps_unknown_placeholders_to_empty():
     assert _clean_airline("NetJets") == "NetJets"
     assert _clean_airline("Private owner") == "Private owner"
     assert _clean_airline("Unknown Air Ltd") == "Unknown Air Ltd"  # whole-string match only
+
+
+class TestRegisteredOwnerIsNotAlwaysTheAirline:
+    """The registered owner is the fallback airline name. New 737 MAXes are
+    still registered to Boeing and leased aircraft to a bank trustee — neither
+    belongs on the panel (c0wsaysmoo saw "Boeing" on new B38M/B39M)."""
+
+    @pytest.mark.parametrize("owner", [
+        "Boeing", "THE BOEING COMPANY", "Airbus SAS", "Embraer SA",
+        "Bombardier Business Jet Solutions", "UMB BANK NA TRUSTEE",
+        "Wells Fargo Trust Co NA", "Bank of Utah Trustee",
+    ])
+    def test_manufacturers_and_trustees_are_no_answer(self, owner):
+        from utilities.overhead import _clean_airline
+        assert _clean_airline(owner) == ""
+
+    @pytest.mark.parametrize("owner", [
+        "United Airlines", "Flexjet", "NetJets", "Bankair",  # word-bounded
+        "Atlantic Airways", "Trustair Charter",              # not "trust" alone
+        "Silver ATR Charters",       # a manufacturer word, but not the owner's name
+    ])
+    def test_real_operators_survive(self, owner):
+        from utilities.overhead import _clean_airline
+        assert _clean_airline(owner) == owner
+
+
+def test_flexjet_is_not_named_after_its_former_owner(tmp_path, monkeypatch):
+    """LXJ is listed under Bombardier Business Jet Solutions in the source
+    database; on ernie two Flexjet records — one an Embraer — said Bombardier.
+
+    Loads from a CACHE that predates the correction, because that is what every
+    Pi has: corrections used to be merged only at download time, so a check of
+    the override table alone passed while the devices still said Bombardier."""
+    import json
+    from utilities import airlines
+    cache = tmp_path / "airlines.json"
+    cache.write_text(json.dumps({"LXJ": "Bombardier Business Jet Solutions",
+                                 "UAL": "United Airlines"}))
+    monkeypatch.setattr(airlines, "CACHE_FILE", str(cache))
+    monkeypatch.setattr(airlines, "_loaded", False)
+    monkeypatch.setattr(airlines, "_db", {})
+    assert airlines.get_airline_name("LXJ") == "Flexjet"
+    assert airlines.get_airline_name("UAL") == "United Airlines"

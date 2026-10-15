@@ -24,6 +24,10 @@ _OVERRIDES = {
     "ASQ": "ExpressJet",       "PDT": "Piedmont Airlines",
     "TIV": "Thrive Aviation",
     "VJA": "Vista America",
+    # The source database still lists LXJ under Bombardier Business Jet
+    # Solutions, which owned Flexjet until 2013. Flexjet flies as LXJ today, so
+    # its jets — Embraers included — were showing "Bombardier" as the airline.
+    "LXJ": "Flexjet",
 }
 
 _db     = {}
@@ -70,6 +74,11 @@ def _load():
             try:
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     _db = json.load(f)
+                # Corrections must apply to the cached copy too. They used to be
+                # merged only when the database was downloaded, so a correction
+                # added later never reached a device until its cache happened to
+                # be refreshed — on the Pis, effectively never.
+                _db.update(_OVERRIDES)
                 _loaded = True
                 return
             except Exception:

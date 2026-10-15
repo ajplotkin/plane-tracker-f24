@@ -33,6 +33,13 @@ def _clean_code(s):
 
 
 _JUNK_AIRLINE = {"", "unknown", "n/a", "na", "none", "null"}
+# Owner names that are a manufacturer (anchored, so "Boeing" matches but an
+# airline merely containing the word would not) or a trustee/bank (word-bounded,
+# so "Bankair" does not).
+_PLACEHOLDER_OWNER = re.compile(
+    r"^(the\s+)?(boeing|airbus|embraer|bombardier|de havilland|atr|comac|mitsubishi)\b"
+    r"|\b(bank|trustee|trust)\b",
+    re.IGNORECASE)
 
 
 def _clean_airline(name):
@@ -46,7 +53,17 @@ def _clean_airline(name):
     runs and the panel never shows the word "Unknown" as an airline.
     """
     name = (name or "").strip()
-    return "" if name.lower() in _JUNK_AIRLINE else name
+    if name.lower() in _JUNK_AIRLINE:
+        return ""
+    # A registered owner is not always the operator. Brand-new deliveries
+    # (737 MAX B38M/B39M especially) are still registered to the manufacturer,
+    # and leased aircraft to a bank trustee ("UMB BANK NA TRUSTEE", "WELLS
+    # FARGO TRUST CO NA"). Neither is an airline anyone wants on the panel;
+    # treat them as no answer so the callsign-based lookup decides. Idea from
+    # c0wsaysmoo, who hit "Boeing" on new MAXes (2026-10-14).
+    if _PLACEHOLDER_OWNER.search(name):
+        return ""
+    return name
 
 from config import (
     DISTANCE_UNITS,
