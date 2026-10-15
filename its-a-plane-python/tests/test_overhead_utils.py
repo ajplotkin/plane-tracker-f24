@@ -766,27 +766,86 @@ def test_clean_airline_maps_unknown_placeholders_to_empty():
 
 
 class TestRegisteredOwnerIsNotAlwaysTheAirline:
-    """The registered owner is the fallback airline name. New 737 MAXes are
-    still registered to Boeing and leased aircraft to a bank trustee — neither
-    belongs on the panel (c0wsaysmoo saw "Boeing" on new B38M/B39M)."""
+    """The registered owner is the fallback airline name. New deliveries are
+    still registered to the manufacturer and leased aircraft to a trustee —
+    neither belongs on the panel (c0wsaysmoo saw "Boeing" on new B38M/B39M).
+
+    Each blanked fixture carries ONE trigger, so every alternative in the
+    pattern is tested on its own; the first version paired "bank" with
+    "trustee" in every case and mutation showed either could be deleted."""
 
     @pytest.mark.parametrize("owner", [
         "Boeing", "THE BOEING COMPANY", "Airbus SAS", "Embraer SA",
-        "Bombardier Business Jet Solutions", "UMB BANK NA TRUSTEE",
-        "Wells Fargo Trust Co NA", "Bank of Utah Trustee",
+        "Bombardier Business Jet Solutions", "De Havilland Aircraft of Canada",
+        "DEHAVILLAND AIRCRAFT", "ATR GIE", "COMAC", "Mitsubishi Aircraft Corp",
+        "Textron Aviation Inc", "Gulfstream Aerospace Corp", "Cessna Aircraft Co",
+        "Cirrus Design Corp", "Dassault Falcon Jet Corp", "Pilatus Business Aircraft",
+        "Piper Aircraft Inc", "Beechcraft Corp", "Honda Aircraft Co", "Daher Aircraft",
+        "TVPX AIRCRAFT SOLUTIONS INC TRUSTEE",     # trustee alone
+        "TVPX ARS INC TRUSTEES",                  # plural
+        "Wells Fargo Trust Co NA",                # trust co, no "trustee"
+        "Bank of Utah Trust Company",
     ])
     def test_manufacturers_and_trustees_are_no_answer(self, owner):
         from utilities.overhead import _clean_airline
         assert _clean_airline(owner) == ""
 
     @pytest.mark.parametrize("owner", [
-        "United Airlines", "Flexjet", "NetJets", "Bankair",  # word-bounded
-        "Atlantic Airways", "Trustair Charter",              # not "trust" alone
-        "Silver ATR Charters",       # a manufacturer word, but not the owner's name
+        "United Airlines", "Flexjet", "NetJets", "Comair",
+        "Bankair", "Trustair Charter", "US Bancorp",          # word-bounded
+        "ATRAN Cargo Airlines", "Boeingville Air",            # trailing boundary
+        "Silver ATR Charters",                                 # anchored
+        "Bank of America", "JPMorgan Chase Bank NA",          # real operators
+        "Devon Air Ambulance Trust", "Northern Air Trust",
+        "Cirrus Aviation Services", "Gulfstream International Airlines",
     ])
     def test_real_operators_survive(self, owner):
         from utilities.overhead import _clean_airline
         assert _clean_airline(owner) == owner
+
+
+def test_every_owner_read_on_the_display_path_goes_through_the_filter():
+    """Structural guard. No test drives the flight pipeline with real details,
+    so deleting the filter from one call site survived mutation. Every place
+    overhead.py reads an owner for display — FR24 registered_owners, adsbdb
+    "owner", a match's airline_name — must sit inside _clean_airline(...)."""
+    import ast, pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    # web/app.py too: its flight search showed the raw owner until 2026-10-15.
+    src = "\n".join((root / f).read_text() for f in ("utilities/overhead.py", "web/app.py"))
+    tree = ast.parse(src)
+    parent = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def is_owner_read(n):
+        if isinstance(n, ast.Call):
+            args = [a.value for a in n.args if isinstance(a, ast.Constant)]
+            f = n.func
+            if isinstance(f, ast.Attribute) and f.attr == "safe_get" and "registered_owners" in args:
+                return True
+            if isinstance(f, ast.Attribute) and f.attr == "get" and args[:1] == ["owner"]:
+                return True
+        if (isinstance(n, ast.Attribute) and n.attr == "airline_name"
+                and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name)
+                and n.value.id == "match"):
+            return True
+        return False
+
+    def wrapped(n):
+        while n in parent:
+            n = parent[n]
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_clean_airline":
+                return True
+            if isinstance(n, ast.stmt):
+                return False
+        return False
+
+    reads = [n for n in ast.walk(tree) if is_owner_read(n)]
+    assert len(reads) >= 5, f"found only {len(reads)} owner reads — the scan is broken"
+    bare = [n.lineno for n in reads if not wrapped(n)]
+    assert not bare, f"owner read without _clean_airline at line(s) {bare}"
 
 
 def test_flexjet_is_not_named_after_its_former_owner(tmp_path, monkeypatch):

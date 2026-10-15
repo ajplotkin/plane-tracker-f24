@@ -33,12 +33,22 @@ def _clean_code(s):
 
 
 _JUNK_AIRLINE = {"", "unknown", "n/a", "na", "none", "null"}
-# Owner names that are a manufacturer (anchored, so "Boeing" matches but an
-# airline merely containing the word would not) or a trustee/bank (word-bounded,
-# so "Bankair" does not).
+# Owner names that are not an operator:
+#  - a manufacturer still holding a new delivery. Anchored, so an operator
+#    whose name merely contains one ("Silver ATR Charters") is kept, and
+#    word-bounded, so "ATRAN Cargo" and "Boeingville Air" are kept. Multi-word
+#    where the bare word is also a real operator: Cirrus Aviation, Gulfstream
+#    International and Piper charters exist, so only the manufacturer's full
+#    name matches.
+#  - a trustee holding a leased aircraft: "TRUSTEE(S)" anywhere, or a "TRUST
+#    CO(MPANY)". Deliberately NOT bare "bank" or "trust": "Bank of America" and
+#    "Devon Air Ambulance Trust" really do operate their own aircraft.
 _PLACEHOLDER_OWNER = re.compile(
-    r"^(the\s+)?(boeing|airbus|embraer|bombardier|de havilland|atr|comac|mitsubishi)\b"
-    r"|\b(bank|trustee|trust)\b",
+    r"^(the\s+)?(boeing|airbus|embraer|bombardier|de\s?havilland|atr|comac|"
+    r"mitsubishi|textron(\s+aviation)?|gulfstream\s+aerospace|cessna\s+aircraft|"
+    r"cirrus\s+design|dassault|pilatus|piper\s+aircraft|beechcraft|"
+    r"honda\s+aircraft|daher)\b"
+    r"|\btrustees?\b|\btrust\s+co(mpany)?\b",
     re.IGNORECASE)
 
 

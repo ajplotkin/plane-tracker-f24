@@ -194,7 +194,11 @@ def lookup_flight(callsign):
         details = api.get_flight_details(match)
         match.set_flight_details(details)
 
-        airline = match.airline_name or ""
+        # Same rule as the panel: a manufacturer or trustee owner is not an
+        # airline. The search page used to show it raw, so it said "Boeing"
+        # for a new MAX that the panel itself left blank.
+        from utilities.overhead import _clean_airline
+        airline = _clean_airline(match.airline_name or "")
         origin = match.origin_airport_iata or "???"
         destination = match.destination_airport_iata or "???"
         number = match.number or callsign
